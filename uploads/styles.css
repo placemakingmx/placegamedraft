@@ -646,4 +646,26 @@ div[data-testid="stNumberInput"] button:focus svg {
   }
 }
 
+@media (max-width: 900px) and (prefers-color-scheme: dark) {
+  /* Buttons (except tabs): force white text */
+  .stButton > button,
+  .stDownloadButton > button,
+  [data-testid="stLinkButton"] > a {
+    color: #ffffff !important;
+  }
+
+  /* Tabs: only selected tab text white */
+  [data-baseweb="tab"][aria-selected="true"] {
+    color: #ffffff !important;
+  }
+
+  /* Dropdown text white */
+  div[data-baseweb="select"] span,
+  div[data-baseweb="select"] input,
+  div[data-baseweb="popover"] [role="option"] {
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+  }
+}
+
 
