@@ -1,0 +1,531 @@
+/* style.css */
+
+/* ===================== ESTILO GLOBAL DE LA APP ===================== */
+
+/* 1. Importa la fuente Poppins correctamente */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+
+/* 2. Fuente global Poppins */
+html, body, [class*="st-"], label, div {
+  font-family: 'Poppins', sans-serif;
+}
+
+/* Forzar color primario de Streamlit a índigo */
+:root {
+  --primary-color: #685BC7 !important;
+}
+
+/* 3. Variables de color de tu manual */
+:root {
+  --space:   #0D0D52;
+  --offwhite:#F4EFE2;
+  --blue:    #0047BB;
+  --indigo:  #685BC7;
+  --lush:    #B7BF10;  /* verde (Lush) */
+  --sunglow: #FED141;  /* amarillo */
+  --orange:  #FF5C39;  /* naranja */
+  --white:   #FFFFFF;
+}
+
+/* 4. Fondo general de la app */
+.stApp {
+  background-color: var(--offwhite) !important;
+  color: var(--space) !important;
+}
+
+/* 5. Quitar esquinas redondeadas de todas las imágenes de la app */
+.stApp img {
+  border-radius: 0 !important;
+}
+
+/* 6. Títulos / encabezados con Poppins (corregidos los selectores) */
+h1, h2, h3, h4, h5, h6,
+.stMarkdown h1,
+.stMarkdown h2,
+.stMarkdown h3,
+.stMarkdown h4,
+.stMarkdown h5,
+.stMarkdown h6,
+[data-testid="stAppViewContainer"] h1,
+[data-testid="stAppViewContainer"] h2,
+.stHeader .stTitle {
+  font-family: 'Poppins', sans-serif !important;
+  font-weight: 400 !important;
+  line-height: 1.2 !important;
+}
+
+@media (max-width: 768px) {
+  h1, .stMarkdown h1, [data-testid="stAppViewContainer"] h1, .stHeader .stTitle { font-size: 1.6rem !important; }
+  h2, .stMarkdown h2, [data-testid="stAppViewContainer"] h2 { font-size: 1.3rem !important; }
+  h3, .stMarkdown h3, [data-testid="stAppViewContainer"] h3 { font-size: 1.15rem !important; }
+}
+
+/* Botones principales (st.button, submit, etc.) */
+.stButton > button {
+  background-color: var(--space) !important;
+  border-radius: 0.5rem !important;   /* o 8rem si quieres píldora, sin espacio */
+  border: 1px solid var(--space) !important;
+  color: var(--white) !important;
+  box-shadow: none !important;
+}
+
+/* Hover de botones normales */
+.stButton > button:hover {
+  background-color: var(--indigo) !important;
+  border-color: var(--indigo) !important;
+  color: var(--white) !important;
+}
+
+/* Botón de enlace (st.link_button) */
+[data-testid="stLinkButton"] > a {
+  background-color: var(--space) !important;
+  border-radius: 0.5rem !important;   /* mismo radio que los otros */
+  border: 1px solid var(--space) !important;
+  color: var(--white) !important;
+  text-decoration: none !important;
+  padding: 0.25rem 0.75rem;           /* opcional, para que se vea como botón */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Hover del botón de enlace */
+[data-testid="stLinkButton"] > a:hover {
+  background-color: var(--indigo) !important;
+  border-color: var(--indigo) !important;
+  color: var(--white) !important;
+}
+
+/* Hover de botones */
+.stButton > button:hover,
+.stLinkButton > button:hover,
+.stLinkButton > a:hover {
+    background-color: var(--indigo)!important;
+    border-color: var(--indigo)!important;
+    color: var(--white)!important;
+}
+
+/* ===================== INPUTS TEXTO Y NÚMEROS — BORDES LIMPIOS ===================== */
+
+/* Contenedor del input (cuadro completo) */
+.stTextInput div[data-baseweb="base-input"],
+.stTextInput div[data-baseweb="input"],
+.stNumberInput div[data-baseweb="base-input"],
+.stNumberInput div[data-baseweb="input"] {
+  border-radius: 0.5rem !important;        /* mismo radio para todo el cuadro */
+  border: 0px solid var(--white) !important; /* borde blanco normal */
+  box-shadow: none !important;              /* sin halo rojo */
+  background-color: var(--white) !important;/* fondo del cuadro */
+  overflow: hidden !important;              /* recorta cualquier “pico” en esquinas */
+}
+
+/* Cuando el input tiene foco */
+.stTextInput div[data-baseweb="base-input"]:focus-within,
+.stTextInput div[data-baseweb="input"]:focus-within,
+.stNumberInput div[data-baseweb="base-input"]:focus-within,
+.stNumberInput div[data-baseweb="input"]:focus-within {
+  border-color: var(--indigo) !important;                     /* borde índigo en foco */
+  box-shadow: 0 0 0 2px rgba(104, 91, 199, 0.35) !important;  /* halo índigo */
+  background-color: var(--white) !important;                  /* fondo sigue uniforme */
+}
+
+/* El input por dentro sin bordes propios ni fondo diferente */
+.stTextInput input,
+.stNumberInput input {
+  border: 0px solid var(--white) !important;;
+  box-shadow: none !important;
+  outline: 0px solid var(--white) !important;
+  background-color: transparent !important; /* usa el fondo del contenedor */
+}
+
+
+/* ===================== RADIOS: ARO AZUL + PUNTO ÍNDIGO DEFINIDO ===================== */
+
+/* El label contendrá el círculo y el texto */
+.stRadio > div[role="radiogroup"] label[data-baseweb="radio"] {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Ocultar el círculo original de BaseWeb (el de la derecha) */
+.stRadio > div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
+    width: 0!important;
+    height: 0!important;
+    margin: 0!important;
+    padding: 0!important;
+    border: none!important;
+    background: none!important;
+}
+
+/* Círculo exterior (aro) siempre visible */
+.stRadio > div[role="radiogroup"] label[data-baseweb="radio"]::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    box-sizing: border-box;
+    border: 2px solid var(--blue);      /* aro azul */
+    background-color: var(--offwhite);  /* fondo del círculo */
+    display: inline-block;
+}
+
+/* Cuando el radio está SELECCIONADO → círculo interior morado, limpio */
+.stRadio > div[role="radiogroup"] label[data-baseweb="radio"]:has(input[type="radio"]:checked)::before {
+    border: 2px solid var(--blue);      /* mantenemos el aro azul */
+    background-color: var(--indigo);    /* color del “punto” */
+    padding: 3px;                       /* grosor del aro */
+    background-clip: content-box;       /* el morado solo en el centro, no en el aro */
+}
+
+/* ======================= ESTILO PARA TABLAS st.table ======================= */
+.stTable {
+  border-radius: 0.75rem;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background-color: var(--white);
+  overflow: hidden;
+  font-family: 'Poppins', sans-serif;
+}
+
+.stTable table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  background-color: var(--white);
+}
+
+.stTable thead tr th {
+  background-color: var(--indigo);
+  color: #ffffff;
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.stTable tbody tr td {
+  padding: 0.45rem 0.75rem;
+  color: var(--space);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.stTable tbody tr:nth-child(even) td {
+  background-color: rgba(0, 0, 0, 0.015);
+}
+
+.stTable tbody tr:hover td {
+  background-color: rgba(254, 209, 65, 0.12);
+}
+
+/* ========== CONTENEDOR SCROLL PARA TABLA (MISMO DISEÑO) ========== */
+.tabla-scroll {
+  max-height: 260px;         /* alto fijo */
+  overflow-y: auto;          /* scroll vertical */
+  overflow-x: auto;          /* scroll horizontal si hace falta */
+  width: 100%;
+  border-radius: 0.75rem;    /* igual que .stTable */
+}
+
+/* En móvil puedes darle un poco más de alto si quieres */
+@media (max-width: 768px) {
+  .tabla-scroll {
+    max-height: 300px;
+  }
+}
+/* Inputs de texto y numéricos (borde azul, sin halo rojo) */
+.stTextInput div[data-baseweb="base-input"],
+.stNumberInput div[data-baseweb="base-input"] {
+  border-radius: 0.5rem !important;
+  border: 1px solid var(--blue) !important;
+  box-shadow: none !important;   /* sin sombra roja */
+}
+
+/* Cuando el input tiene foco */
+.stTextInput div[data-baseweb="base-input"]:focus-within,
+.stNumberInput div[data-baseweb="base-input"]:focus-within {
+  border-color: var(--indigo) !important;
+  box-shadow: 0 0 0 2px rgba(104, 91, 199, 0.35) !important; /* halo índigo */
+}
+
+/* El input por dentro sin bordes propios */
+.stTextInput input,
+.stNumberInput input {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+   /* Color del punto y aro de los st.radio */
+   .stRadio input[type="radio"] {
+     accent-color: var(--indigo) !important;  /* o var(--blue) si prefieres */
+   }
+   
+   /* Texto del radio seleccionado */
+.stRadio div[role="radiogroup"] label[data-baseweb="radio"] span {
+  color: var(--space); /* color normal */
+}
+
+.stRadio div[role="radiogroup"] input[type="radio"]:checked
+  + div span {
+  color: var(--indigo);
+}
+/* ================= SLIDER STREAMLIT — SOLO COLORES ================= */
+
+/* 1. Thumb (bolita) */
+div[role="slider"] {
+  background-color: #685BC7 !important;       /* bolita índigo */
+  border: 2px solid #685BC7 !important;       /* borde índigo */
+  box-shadow: 0 0 0 0.25rem rgba(104, 91, 199, 0.35) !important;  /* halo morado */
+  outline: none !important;
+}
+
+/* 2. Burbuja del número (19, 59, etc.) */
+div[data-testid="stSliderThumbValue"] {
+  background-color: #685BC7 !important;  /* fondo índigo */
+  color: #F4EFE2 !important;             /* texto claro */
+  border-radius: 999px !important;
+  padding: 0.1rem 0.5rem !important;
+}
+
+   /* Barra del slider: tramo seleccionado y no seleccionado en índigo */
+   div.stSlider.st-emotion-cache-igqoeg.e10fdlpp0
+     div.st-emotion-cache-1rr4qq7.e10fdlpp3
+     > div[style*="0.25rem"] {
+     /* Recoloreamos lo que pinte Streamlit */
+     filter: hue-rotate(250deg) saturate(1.2);
+   }
+   
+   /* ===================== DROPDOWNS (SELECTBOX / MULTISELECT) ===================== */
+
+/* Contenedor del dropdown (cuadro completo) */
+.stSelectbox div[data-baseweb="select"],
+.stMultiSelect div[data-baseweb="select"] {
+    border-radius: 0.5rem !important;          /* mismo radio que los inputs */
+    border: 1px solid var(--blue) !important;  /* borde azul normal */
+    background-color: var(--white) !important; /* fondo uniforme */
+    box-shadow: none !important;               /* sin halo rojo */
+    overflow: hidden !important;               /* recorta esquinas internas */
+}
+
+/* Estado con foco (cuando haces clic en el dropdown) */
+.stSelectbox div[data-baseweb="select"]:focus-within,
+.stMultiSelect div[data-baseweb="select"]:focus-within {
+    border-color: var(--indigo) !important;    /* borde índigo en foco */
+    box-shadow: 0 0 0 2px rgba(104, 91, 199, 0.35) !important; /* halo índigo */
+    background-color: var(--white) !important; /* fondo sigue limpio */
+}
+
+/* Interior del dropdown: que no meta otros bordes/fondos raros */
+.stSelectbox div[data-baseweb="select"] > div,
+.stMultiSelect div[data-baseweb="select"] > div {
+    background-color: transparent !important;  /* usa el fondo del contenedor */
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Input interno (texto de búsqueda / selección) sin bordes propios */
+.stSelectbox div[data-baseweb="select"] input,
+.stMultiSelect div[data-baseweb="select"] input {
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    background-color: transparent !important;
+}
+
+/* Icono de flecha del dropdown en azul */
+.stSelectbox div[data-baseweb="select"] svg,
+.stMultiSelect div[data-baseweb="select"] svg {
+    color: var(--blue) !important;
+}
+
+/* Texto del valor seleccionado y placeholder */
+.stSelectbox div[data-baseweb="select"] span,
+.stMultiSelect div[data-baseweb="select"] span {
+    color: var(--space); /* mismo color de texto que el resto */
+    font-family: 'Poppins', sans-serif !important;
+}
+
+/* ===================== CHECKBOX PERSONALIZADA ===================== */
+
+/* Contenedor general de la fila de checkbox */
+.stCheckbox {
+    display: flex;
+    align-items: center;
+}
+
+/* El label que envuelve span + input + texto */
+.stCheckbox label {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+/* 1) Ocultar completamente el input nativo (la checkbox roja) */
+.stCheckbox label input[type="checkbox"] {
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    appearance: none !important;
+    position: absolute;
+    opacity: 0 !important;      /* invisible */
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    padding: 0;
+    border: none !important;
+    background: none !important;
+}
+
+/* 2) Usar el <span> como ÚNICA caja visible de la checkbox */
+.stCheckbox label > span {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    box-sizing: border-box;
+    border-radius: 0.25rem;
+    border: 2px solid var(--blue) !important;       /* borde azul */
+    background-color: var(--offwhite) !important;   /* fondo claro */
+    position: relative;
+    flex-shrink: 0;
+
+    /* Anular cualquier icono/imagen que ponga Streamlit */
+    background-image: none !important;
+    -webkit-mask: none !important;
+    mask: none !important;
+}
+
+/* Por si Streamlit mete algo dentro del span (svg, etc.): lo apagamos */
+.stCheckbox label > span * {
+    display: none !important;
+}
+
+/* También anulamos posibles pseudo-elementos previos de ese span */
+.stCheckbox label > span::before {
+    content: none !important;
+}
+
+/* 3) Estado CHECKED: caja morada + halo índigo */
+.stCheckbox label:has(input[type="checkbox"]:checked) > span {
+    background-color: var(--indigo) !important;
+    border-color: var(--indigo) !important;
+    box-shadow: 0 0 0 2px rgba(104, 91, 199, 0.35);
+}
+
+/* 4) ÚNICA palomita blanca dentro de la caja morada */
+.stCheckbox label:has(input[type="checkbox"]:checked) > span::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 6px;
+    height: 10px;
+    border: solid var(--white);
+    border-width: 0 2px 2px 0;
+    transform: translate(-50%, -50%) rotate(45deg);
+    pointer-events: none;
+}
+
+/* 5) Estado de foco (teclado) sobre el input: resaltar la caja */
+.stCheckbox label:has(input[type="checkbox"]:focus-visible) > span {
+    border-color: var(--indigo) !important;
+    box-shadow: 0 0 0 2px rgba(104, 91, 199, 0.5);
+}
+
+/* 6) Contenedor del texto (el <div> que envuelve el <p>) */
+.stCheckbox label > div {
+    margin: 0 !important;
+    padding: 0 !important;
+    display: flex;
+    align-items: center;   /* centra verticalmente el texto */
+}
+
+.stCheckbox label > span {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    box-sizing: border-box;
+    border-radius: 0.25rem;
+    border: 2px solid var(--blue)!important;
+    background-color: var(--offwhite)!important;
+    position: relative;
+    flex-shrink: 0;
+
+    /* NUEVO: ajuste fino vertical */
+    top: 1px;   /* prueba con 1; si sigue un poco alto/bajo, usa 0, 2 o -1 */
+    background-image: none!important;
+    -webkit-mask: none!important;
+    mask: none!important;
+}
+
+/* Contenedor del texto (el <div> que envuelve el <p>) */
+.stCheckbox label > div {
+    margin: 0!important;
+    padding: 0!important;
+    display: flex;
+    align-items: center;      /* centra verticalmente el <p> respecto al cuadro */
+}
+
+/* 7) Texto de la opción */
+.stCheckbox label p {
+    margin: 0;
+    line-height: 1;
+    color: var(--space);
+    font-family: 'Poppins', sans-serif!important;
+    position: relative;
+    top: -1px;  /* micro‑ajuste vertical del texto */
+}
+
+/* Color INDIGO para los botones +/- de todos los number_input */
+div[data-testid="stNumberInput"] button svg {
+  color: #4f46e5 !important;   /* indigo */
+}
+
+/* (Opcional) mismo color al pasar el mouse */
+div[data-testid="stNumberInput"] button:hover svg {
+  color: #4338ca !important;   /* indigo un poco más oscuro */
+}
+/* ============================
+   1. Estado normal (+ y -)
+   ============================ */
+
+/* Color INDIGO del icono en estado normal */
+div[data-testid="stNumberInput"] button svg {
+  color: #4f46e5 !important;  /* indigo */
+  fill:  #4f46e5 !important;
+}
+
+/* Si también quieres que el propio botón use ese color */
+div[data-testid="stNumberInput"] button {
+  color: #4f46e5 !important;
+}
+
+/* ============================
+   2. Estado hover / focus
+   ============================ */
+
+/* Forzar color del botón cuando está en hover/focus */
+div[data-testid="stNumberInput"] button:hover,
+div[data-testid="stNumberInput"] button:focus {
+  color: #4f46e5 !important;            /* texto/icono */
+  background-color: transparent !important; /* o el fondo que quieras */
+}
+
+/* Forzar también el SVG dentro del botón en hover/focus */
+div[data-testid="stNumberInput"] button:hover svg,
+div[data-testid="stNumberInput"] button:focus svg {
+  color: #4f46e5 !important;
+  fill:  #4f46e5 !important;
+}
+
+/* Contenedor del number_input cuando está enfocado */
+.st-emotion-cache-1py5frv.focused {
+    border-color: #4f46e5 !important;      /* índigo */
+    box-shadow: 0 0 0 1px rgba(79, 70, 229, 0.3) !important;  /* opcional */
+}
+
+.st-emotion-cache-1py5frv:hover {
+    border-color: #4f46e5 !important;
+}
+
