@@ -1,4 +1,5 @@
 import os
+import uuid
 from pathlib import Path
 from collections import defaultdict
 
@@ -8,8 +9,10 @@ import matplotlib.pyplot as plt
 from pycirclize import Circos
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit.errors import StreamlitSecretNotFoundError
-import gspread
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 
 def get_value(ans, key, na_key=None, cast=float, scale=1.0):
     if na_key and ans.get(na_key):
@@ -21,78 +24,6 @@ def get_value(ans, key, na_key=None, cast=float, scale=1.0):
         return cast(v) * scale
     except (TypeError, ValueError):
         return None
-
-
-SHEET_COLUMNS = [
-    "nombre_lugar",
-    "nombre_evaluador",
-    "programa",
-    "genero_id",
-    "equipo_responsable_id",
-    "A1.1",
-    "A1.2",
-    "A1.3",
-    "A1.4",
-    "A1.5",
-    "A1_total",
-    "A2.1",
-    "A2.2",
-    "A2.3",
-    "A2.4",
-    "A2.5",
-    "A2.6",
-    "A2_total",
-    "A3.1",
-    "A3.2",
-    "A3.3",
-    "A3.4",
-    "A3.5",
-    "A3.6",
-    "A3.7",
-    "A3_total",
-    "A4.1",
-    "A4.2",
-    "A4.3",
-    "A4.4",
-    "A4.5",
-    "A4.6",
-    "A4_total",
-    "global_score",
-]
-
-
-def _safe_secrets() -> dict:
-    try:
-        return st.secrets
-    except StreamlitSecretNotFoundError:
-        return {}
-
-
-def _get_sheet_config() -> tuple[str | None, str]:
-    secrets = _safe_secrets()
-    sheet_url = secrets.get("google_sheet_url") if "google_sheet_url" in secrets else None
-    if not sheet_url:
-        sheet_url = os.getenv("GOOGLE_SHEET_URL")
-    sheet_tab = secrets.get("google_sheet_tab") if "google_sheet_tab" in secrets else None
-    if not sheet_tab:
-        sheet_tab = os.getenv("GOOGLE_SHEET_TAB", "Hoja 1")
-    return sheet_url, sheet_tab
-
-
-def append_to_google_sheet(row_data: dict) -> tuple[bool, str]:
-    sheet_url, sheet_tab = _get_sheet_config()
-    if not sheet_url:
-        return False, "Falta GOOGLE_SHEET_URL en st.secrets o variables de entorno."
-    secrets = _safe_secrets()
-    if "gcp_service_account" not in secrets:
-        return False, "Falta gcp_service_account en st.secrets."
-
-    client = gspread.service_account_from_dict(secrets["gcp_service_account"])
-    worksheet = client.open_by_url(sheet_url).worksheet(sheet_tab)
-
-    row = [row_data.get(col, "") for col in SHEET_COLUMNS]
-    worksheet.append_row(row, value_input_option="USER_ENTERED")
-    return True, "OK"
 
 
 # ──────────────────────────────────────────
@@ -129,6 +60,49 @@ def cargar_css_local(css_path: Path) -> None:
 
 cargar_css_local(CSS_PATH)
 
+# Force light appearance on mobile to keep text legible.
+MOBILE_FORCE_LIGHT = """
+<style>
+@media (max-width: 900px) {
+  :root {
+    color-scheme: light !important;
+  }
+  html, body, [data-testid="stAppViewContainer"], [data-testid="stAppViewContainer"] .main {
+    background-color: #f7f9fc !important;
+    color: #0f172a !important;
+  }
+  [data-testid="stSidebar"] {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+  }
+  h1, h2, h3, h4, h5, h6, p, span, label, li,
+  [data-testid="stMarkdownContainer"], [data-testid="stMetricLabel"],
+  [data-testid="stMetricValue"], [data-testid="stWidgetLabel"] {
+    color: #0f172a !important;
+  }
+  .stTextInput input,
+  .stNumberInput input,
+  .stTextArea textarea,
+  div[data-baseweb="select"] > div,
+  [data-baseweb="base-input"] > div {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #cbd5e1 !important;
+  }
+  .stButton > button,
+  .stDownloadButton > button {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border: 1px solid #cbd5e1 !important;
+  }
+  [data-baseweb="tab"] {
+    color: #0f172a !important;
+  }
+}
+</style>
+"""
+st.markdown(MOBILE_FORCE_LIGHT, unsafe_allow_html=True)
+
 if LOGO_PATH.exists():
     st.image(str(LOGO_PATH), width=170)
 
@@ -136,39 +110,196 @@ if LOGO_PATH.exists():
 # 3. Estado y navegación
 # ──────────────────────────────────────────
 # Initialize core state
+if "step" not in st.session_state:
+    st.session_state["step"] = 0
+if "scroll_target" not in st.session_state:
+    st.session_state["scroll_target"] = None
 if "answers" not in st.session_state:
     st.session_state["answers"] = {}
-if "save_pending" not in st.session_state:
-    st.session_state["save_pending"] = False
-if "saved_to_sheet" not in st.session_state:
-    st.session_state["saved_to_sheet"] = False
-if "force_reload" not in st.session_state:
-    st.session_state["force_reload"] = False
+if "pending_submit" not in st.session_state:
+    st.session_state["pending_submit"] = False
+if "submission_id" not in st.session_state:
+    st.session_state["submission_id"] = None
+if "last_submitted_id" not in st.session_state:
+    st.session_state["last_submitted_id"] = None
+if "google_credentials" not in st.session_state:
+    st.session_state["google_credentials"] = None
+if "oauth_state" not in st.session_state:
+    st.session_state["oauth_state"] = None
 
-if st.session_state.get("force_reload"):
-    st.session_state["force_reload"] = False
-    components.html("<script>window.parent.location.reload();</script>", height=0)
-    st.stop()
+# Google Sheets configuration
+SPREADSHEET_ID = "1yE0cz1a3rf5sHhubtlo_TMNiZeqNEcnApZoq4zWlcRg"
+SHEET_NAME = "Hoja 1"
+SHEET_COLUMNS = [
+    "nombre_lugar",
+    "nombre_evaluador",
+    "programa",
+    "genero_id",
+    "equipo_responsable_id",
+    "A1.1",
+    "A1.2",
+    "A1.3",
+    "A1.4",
+    "A1.5",
+    "A1_total",
+    "A2.1",
+    "A2.2",
+    "A2.3",
+    "A2.4",
+    "A2.5",
+    "A2.6",
+    "A2_total",
+    "A3.1",
+    "A3.2",
+    "A3.3",
+    "A3.4",
+    "A3.5",
+    "A3.6",
+    "A3.7",
+    "A3_total",
+    "A4.1",
+    "A4.2",
+    "A4.3",
+    "A4.4",
+    "A4.5",
+    "A4.6",
+    "A4_total",
+    "global_score",
+]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-def reset_evaluacion() -> None:
-    # Clear widget state while keeping base keys we re-init below.
-    keep_keys = {
-        "answers",
-        "save_pending",
-        "saved_to_sheet",
-        "force_reload",
+def scroll_to_here(delay_ms: int = 200, key: str | None = None) -> None:
+    """Hace scroll suave a un elemento con id == key después de delay_ms ms."""
+    if key is None:
+        return
+    js = f"""
+    <script>
+    function _st_scroll() {{
+        const el = window.parent.document.getElementById("{key}");
+        if (el) {{
+            el.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+        }} else {{
+            window.parent.scrollTo({{top: 0, behavior: 'smooth'}});
+        }}
+    }}
+    setTimeout(_st_scroll, {delay_ms});
+    </script>
+    """
+    components.html(js, height=0)
+
+def _oauth_client_config() -> dict:
+    cfg = st.secrets.get("google_oauth", {})
+    return {
+        "web": {
+            "client_id": cfg.get("client_id", ""),
+            "client_secret": cfg.get("client_secret", ""),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [cfg.get("redirect_uri", "")],
+        }
     }
-    keys_to_clear = [k for k in st.session_state.keys() if k not in keep_keys]
-    for k in keys_to_clear:
-        st.session_state.pop(k, None)
-    st.session_state["answers"] = {}
-    st.session_state["save_pending"] = False
-    st.session_state["saved_to_sheet"] = False
-    st.session_state["force_reload"] = True
+
+def _oauth_redirect_uri() -> str:
+    return st.secrets.get("google_oauth", {}).get("redirect_uri", "")
+
+def oauth_config_ready() -> bool:
+    cfg = st.secrets.get("google_oauth", {})
+    return bool(cfg.get("client_id") and cfg.get("client_secret") and cfg.get("redirect_uri"))
+
+def build_flow() -> Flow:
+    return Flow.from_client_config(
+        _oauth_client_config(),
+        scopes=SCOPES,
+        redirect_uri=_oauth_redirect_uri(),
+    )
+
+def credentials_to_dict(creds: Credentials) -> dict:
+    return {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": creds.scopes,
+    }
+
+def credentials_from_session() -> Credentials | None:
+    data = st.session_state.get("google_credentials")
+    if not data:
+        return None
+    creds = Credentials(**data)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        st.session_state["google_credentials"] = credentials_to_dict(creds)
+    return creds
+
+def get_auth_url() -> str:
+    flow = build_flow()
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    st.session_state["oauth_state"] = state
+    return auth_url
+
+def handle_oauth_callback() -> None:
+    params = st.query_params
+    code = params.get("code")
+    state = params.get("state")
+    if isinstance(code, list):
+        code = code[0] if code else None
+    if isinstance(state, list):
+        state = state[0] if state else None
+    if not code:
+        return
+    if st.session_state.get("oauth_state") and state != st.session_state["oauth_state"]:
+        st.error("Error de autenticación: estado OAuth inválido.")
+        return
+    flow = build_flow()
+    flow.fetch_token(code=code)
+    st.session_state["google_credentials"] = credentials_to_dict(flow.credentials)
+    st.session_state["oauth_state"] = None
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
     st.rerun()
 
-def trigger_save_to_sheet() -> None:
-    st.session_state["save_pending"] = True
+def append_row_to_sheet(row: list) -> tuple[bool, str | None]:
+    creds = credentials_from_session()
+    if not creds:
+        return False, "not_authorized"
+    service = build("sheets", "v4", credentials=creds)
+    body = {"values": [row]}
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SHEET_NAME}!A1",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body=body,
+    ).execute()
+    return True, None
+
+# Handle OAuth callback as early as possible
+handle_oauth_callback()
+
+def go_prev_section() -> None:
+    st.session_state["step"] = max(0, st.session_state["step"] - 1)
+    st.session_state["scroll_target"] = f"sec_{st.session_state['step']}"
+    st.rerun()
+
+def go_next_section(max_sections: int) -> None:
+    st.session_state["step"] = min(max_sections - 1, st.session_state["step"] + 1)
+    st.session_state["scroll_target"] = f"sec_{st.session_state['step']}"
+    st.rerun()
+
+def go_results(results_index: int) -> None:
+    st.session_state["pending_submit"] = True
+    st.session_state["submission_id"] = str(uuid.uuid4())
+    st.session_state["step"] = results_index
+    st.session_state["scroll_target"] = "resultados"
+    st.rerun()
 
 def get_ans(key, default=None):
     return st.session_state["answers"].get(key, default)
@@ -755,7 +886,7 @@ PROJECTS = [
     },
     {
         "id": 22,
-        "program_id": "LAPIS_PRIV",
+        "program_id": "LAPIS_PUB",
         "estado": "Querétaro",
         "municipio": "San Juan del Río",
         "tipologia": "LQC",
@@ -1981,13 +2112,6 @@ def pagina_antes():
             set_ans("project_gmaps_url", p["gmaps_url"])
             set_ans("project_lat", p["lat"])
             set_ans("project_lon", p["lon"])
-            # Prefill evaluation fields with selected project info
-            st.session_state["nombre_lugar_input"] = p["proyecto"]
-            st.session_state["a0_estado"] = p["estado"]
-            st.session_state["a0_municipio"] = p["municipio"]
-            set_ans("nombre_lugar", p["proyecto"])
-            set_ans("a0_estado", p["estado"])
-            set_ans("a0_municipio", p["municipio"])
 
             st.markdown("### Información del proyecto seleccionado")
             st.write(f"**Estado:** {p['estado']}")
@@ -2016,19 +2140,12 @@ def pagina_antes():
         answers.get("project_nombre") or answers.get("nombre_lugar") or ""
     )
     with col_lugar:
-        if "nombre_lugar_input" in st.session_state:
-            nombre_lugar = st.text_input(
-                "Nombre del lugar",
-                placeholder="Ej. Parque México, Reggio Emilia, etc.",
-                key="nombre_lugar_input",
-            )
-        else:
-            nombre_lugar = st.text_input(
-                "Nombre del lugar",
-                value=nombre_lugar_default,
-                placeholder="Ej. Parque México, Reggio Emilia, etc.",
-                key="nombre_lugar_input",
-            )
+        nombre_lugar = st.text_input(
+            "Nombre del lugar",
+            value=nombre_lugar_default,
+            placeholder="Ej. Parque México, Reggio Emilia, etc.",
+            key="nombre_lugar_input",
+        )
         set_ans("nombre_lugar", nombre_lugar)
 
     with col_eval:
@@ -2043,33 +2160,21 @@ def pagina_antes():
     col_estado, col_municipio = st.columns(2)
     with col_estado:
         estado_default = answers.get("project_estado") or answers.get("a0_estado") or ""
-        if "a0_estado" in st.session_state:
-            estado = st.text_input(
-                "Estado",
-                key="a0_estado",
-            )
-        else:
-            estado = st.text_input(
-                "Estado",
-                value=estado_default,
-                key="a0_estado",
-            )
+        estado = st.text_input(
+            "Estado",
+            value=estado_default,
+            key="a0_estado",
+        )
         set_ans("a0_estado", estado)
     with col_municipio:
         mun_default = (
             answers.get("project_municipio") or answers.get("a0_municipio") or ""
         )
-        if "a0_municipio" in st.session_state:
-            municipio = st.text_input(
-                "Ciudad / Municipio / Alcaldía",
-                key="a0_municipio",
-            )
-        else:
-            municipio = st.text_input(
-                "Ciudad / Municipio / Alcaldía",
-                value=mun_default,
-                key="a0_municipio",
-            )
+        municipio = st.text_input(
+            "Ciudad / Municipio / Alcaldía",
+            value=mun_default,
+            key="a0_municipio",
+        )
         set_ans("a0_municipio", municipio)
 
     st.markdown("---")
@@ -2796,200 +2901,6 @@ def pagina_resultados():
         f"**Evaluado por:** {nombre_eval or 'Sin especificar'}"
     )
 
-    # ===== Configuración de sectores y scores para las gráficas =====
-    sector_names = [
-        "Usos y Actividades",
-        "Comodidad e Imagen",
-        "Conexiones y Accesos",
-        "Encuentro",
-    ]
-    SECTOR_CONFIG = {
-        "Encuentro": {
-            "middle_labels": [
-                "Diversidad",
-                "Cuidado",
-                "Comunidad",
-                "Compartido",
-                "Símbolos",
-                "Orgullo",
-                "Amigable",
-                "Interactivo",
-            ],
-            "outer_labels": ["A1.1", "A1.2", "A1.3", "A1.4", "A1.5"],
-        },
-        "Conexiones y Accesos": {
-            "middle_labels": [
-                "Cercano",
-                "Conectado",
-                "Conveniente",
-                "Accesible\n(movilidad reducida)",
-                "Accesible (primera\ninfancia y cuidadores)",
-                "Transitable",
-            ],
-            "outer_labels": ["A2.1", "A2.2", "A2.3", "A2.4", "A2.5", "A2.6"],
-        },
-        "Comodidad e Imagen": {
-            "middle_labels": [
-                "Limpio",
-                "Seguro",
-                "Sentable",
-                "Agradable",
-                "Verde",
-                "Caminable",
-                "Resiliencia climática",
-            ],
-            "outer_labels": [
-                "A3.1",
-                "A3.2",
-                "A3.3",
-                "A3.4",
-                "A3.5",
-                "A3.6",
-                "A3.7",
-            ],
-        },
-        "Usos y Actividades": {
-            "middle_labels": [
-                "Dinámico",
-                "Especial",
-                "Real",
-                "Útil",
-                "Local",
-                "Sostenible",
-                "Conmemorativo",
-                "Comunitario",
-            ],
-            "outer_labels": ["A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6"],
-        },
-    }
-
-    scores_middle = {
-        "Usos y Actividades": intangibles_A4,
-        "Comodidad e Imagen": intangibles_A3,
-        "Conexiones y Accesos": intangibles_A2,
-        "Encuentro": intangibles_A1,
-    }
-    scores_outer = {
-        "Usos y Actividades": A4_indicators,
-        "Comodidad e Imagen": A3_indicators,
-        "Conexiones y Accesos": A2_indicators,
-        "Encuentro": A1_indicators,
-    }
-
-    # ──────────────────────────────────────────
-    # Rueda global  (drop-in replacement)
-    # ──────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("<h3 style='text-align: center;'>Diagrama de Lugar</h3>", unsafe_allow_html=True)
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.textpath import TextPath
-    from matplotlib.patches import PathPatch
-    from matplotlib.font_manager import FontProperties
-    from matplotlib.transforms import Affine2D
-    from pycirclize import Circos
-
-    # Use Roboto everywhere (make sure the font is available in your system)
-    plt.rcParams["font.family"] = "Roboto"
-
-    # ----- 1.  COLORS --------------------------------------------------------------
-    track_colors = {
-        "Usos y Actividades": {"inner": "#D15E4C", "middle": "#E09F92", "outer": "#F4D8CE"},
-        "Comodidad e Imagen": {"inner": "#A8BA4F", "middle": "#CDD492", "outer": "#EEF2CB"},
-        "Conexiones y Accesos": {"inner": "#25447E", "middle": "#6F8EB4", "outer": "#B2C3D3"},
-        "Encuentro":           {"inner": "#575693", "middle": "#9D9EBA", "outer": "#D0D3D9"},
-    }
-
-    # ----- 2.  RADIO ---------------------------------------------------------------
-    r_center_min, r_center_max = 0,   5          # disco central
-    r_inner_min,  r_inner_max  = 10, 45          # anillo del atributo (sector title vive aquí)
-    r_mid_min,    r_mid_max    = 50, 85          # anillo intangibles
-    r_outer_min,  r_outer_max  = 80, 115         # anillo indicadores
-
-    # ----- 3.  SECTORES Y PUNTAJES -------------------------------------------------
-    sectors = {name: 90 for name in sector_names}           # 4 × 90 °
-    circos = Circos(sectors, space=0)                       # sin huecos
-
-    #  «sector_scores» ya existe en tu código; si no, constrúyelo igual que antes
-    # (Este bloque es idéntico al tuyo; lo incluyo por claridad)
-    sector_scores = {}
-    for name in sector_names:
-        mid_labels  = SECTOR_CONFIG[name]["middle_labels"]
-        out_labels  = SECTOR_CONFIG[name]["outer_labels"]
-        middle_pcts = [scores_middle.get(name,  {}).get(lbl, 0.0) for lbl in mid_labels]
-        outer_pcts  = [scores_outer .get(name,  {}).get(lbl, 0.0) for lbl in out_labels]
-        sector_scores[name] = {
-            "middle_pcts":  middle_pcts,
-            "outer_pcts":   outer_pcts,
-            "middle_labels": mid_labels,
-            "outer_labels":  out_labels,
-        }
-
-    # ----- 5.  FIGURA BASE ---------------------------------------------------------
-    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
-    ax  = fig.axes[0]
-
-    # ----- 4.  DIBUJO DE LOS ANILLOS ----------------------------------------------
-    for sector in circos.sectors:
-        name   = sector.name
-        colors = track_colors[name]
-        length = sector.size
-
-        middle_pcts = sector_scores[name]["middle_pcts"]
-        outer_pcts  = sector_scores[name]["outer_pcts"]
-
-        # ANILLO INNER (fondo del atributo)
-        t_inner = sector.add_track((r_inner_min, r_inner_max))
-        t_inner.rect(0, length, fc=colors["inner"], ec="white", lw=4)
-
-        # ANILLO MIDDLE (intangibles)
-        if middle_pcts:
-            blk = length / len(middle_pcts)
-            for i, pct in enumerate(middle_pcts):
-                start, end = i * blk, (i + 1) * blk
-                ratio = nz(pct) / 100.0
-                # Color lleno
-                if ratio > 0:
-                    t = sector.add_track((r_mid_min,
-                                        r_mid_min + (r_mid_max - r_mid_min) * ratio))
-                    t.rect(start, end, fc=colors["middle"], ec="white", lw=4)
-                # Color vacío
-                if ratio < 1:
-                    t = sector.add_track((r_mid_min + (r_mid_max - r_mid_min) * ratio,
-                                        r_mid_max))
-                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=4)
-
-        # ANILLO OUTER (indicadores)
-        if outer_pcts:
-            blk = length / len(outer_pcts)
-            for i, pct in enumerate(outer_pcts):
-                start, end = i * blk, (i + 1) * blk
-                ratio = nz(pct) / 100.0
-                # Lleno
-                if ratio > 0:
-                    t = sector.add_track((r_outer_min,
-                                        r_outer_min + (r_outer_max - r_outer_min) * ratio))
-                    t.rect(start, end, fc=colors["outer"], ec="white", lw=6)
-                # Vacío
-                if ratio < 1:
-                    t = sector.add_track((r_outer_min + (r_outer_max - r_outer_min) * ratio,
-                                        r_outer_max))
-                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=6)
-
-    # ----- 5.  FIGURA BASE ---------------------------------------------------------
-    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
-    ax  = fig.axes[0]
-
-
-    # ----- 8.  DISCO CENTRAL Y TEXTO “LUGAR” ---------------------------------------
-
-
-
-
-    # ----- 7.  MOSTRAR EN STREAMLIT ------------------------------------------------
-    st.pyplot(fig, use_container_width=True)
-
     # ===== Interpretación de resultados will be placed after the main diagram =====
     # Define helper function for performance levels
     def nivel_desempeno(score_0_100: float) -> str:
@@ -3275,6 +3186,203 @@ def pagina_resultados():
                 )
 
         st.write("- " + msg)
+
+    # ===== Configuración de sectores y scores para las gráficas =====
+    sector_names = [
+        "Usos y Actividades",
+        "Comodidad e Imagen",
+        "Conexiones y Accesos",
+        "Encuentro",
+    ]
+    SECTOR_CONFIG = {
+        "Encuentro": {
+            "middle_labels": [
+                "Diversidad",
+                "Cuidado",
+                "Comunidad",
+                "Compartido",
+                "Símbolos",
+                "Orgullo",
+                "Amigable",
+                "Interactivo",
+            ],
+            "outer_labels": ["A1.1", "A1.2", "A1.3", "A1.4", "A1.5"],
+        },
+        "Conexiones y Accesos": {
+            "middle_labels": [
+                "Cercano",
+                "Conectado",
+                "Conveniente",
+                "Accesible\n(movilidad reducida)",
+                "Accesible (primera\ninfancia y cuidadores)",
+                "Transitable",
+            ],
+            "outer_labels": ["A2.1", "A2.2", "A2.3", "A2.4", "A2.5", "A2.6"],
+        },
+        "Comodidad e Imagen": {
+            "middle_labels": [
+                "Limpio",
+                "Seguro",
+                "Sentable",
+                "Agradable",
+                "Verde",
+                "Caminable",
+                "Resiliencia climática",
+            ],
+            "outer_labels": [
+                "A3.1",
+                "A3.2",
+                "A3.3",
+                "A3.4",
+                "A3.5",
+                "A3.6",
+                "A3.7",
+            ],
+        },
+        "Usos y Actividades": {
+            "middle_labels": [
+                "Dinámico",
+                "Especial",
+                "Real",
+                "Útil",
+                "Local",
+                "Sostenible",
+                "Conmemorativo",
+                "Comunitario",
+            ],
+            "outer_labels": ["A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6"],
+        },
+    }
+
+    scores_middle = {
+        "Usos y Actividades": intangibles_A4,
+        "Comodidad e Imagen": intangibles_A3,
+        "Conexiones y Accesos": intangibles_A2,
+        "Encuentro": intangibles_A1,
+    }
+    scores_outer = {
+        "Usos y Actividades": A4_indicators,
+        "Comodidad e Imagen": A3_indicators,
+        "Conexiones y Accesos": A2_indicators,
+        "Encuentro": A1_indicators,
+    }
+
+    # ──────────────────────────────────────────
+    # Rueda global  (drop-in replacement)
+    # ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("<h3 style='text-align: center;'>Diagrama de Lugar</h3>", unsafe_allow_html=True)
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.textpath import TextPath
+    from matplotlib.patches import PathPatch
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.transforms import Affine2D
+    from pycirclize import Circos
+
+    # Use Roboto everywhere (make sure the font is available in your system)
+    plt.rcParams["font.family"] = "Roboto"
+
+    # ----- 1.  COLORS --------------------------------------------------------------
+    track_colors = {
+        "Usos y Actividades": {"inner": "#D15E4C", "middle": "#E09F92", "outer": "#F4D8CE"},
+        "Comodidad e Imagen": {"inner": "#A8BA4F", "middle": "#CDD492", "outer": "#EEF2CB"},
+        "Conexiones y Accesos": {"inner": "#25447E", "middle": "#6F8EB4", "outer": "#B2C3D3"},
+        "Encuentro":           {"inner": "#575693", "middle": "#9D9EBA", "outer": "#D0D3D9"},
+    }
+
+    # ----- 2.  RADIO ---------------------------------------------------------------
+    r_center_min, r_center_max = 0,   5          # disco central
+    r_inner_min,  r_inner_max  = 10, 45          # anillo del atributo (sector title vive aquí)
+    r_mid_min,    r_mid_max    = 50, 85          # anillo intangibles
+    r_outer_min,  r_outer_max  = 80, 115         # anillo indicadores
+
+    # ----- 3.  SECTORES Y PUNTAJES -------------------------------------------------
+    sector_names = ["Usos y Actividades", "Comodidad e Imagen",
+                    "Conexiones y Accesos", "Encuentro"]
+
+    sectors = {name: 90 for name in sector_names}           # 4 × 90 °
+    circos = Circos(sectors, space=0)                       # sin huecos
+
+    #  «sector_scores» ya existe en tu código; si no, constrúyelo igual que antes
+    # (Este bloque es idéntico al tuyo; lo incluyo por claridad)
+    sector_scores = {}
+    for name in sector_names:
+        mid_labels  = SECTOR_CONFIG[name]["middle_labels"]
+        out_labels  = SECTOR_CONFIG[name]["outer_labels"]
+        middle_pcts = [scores_middle.get(name,  {}).get(lbl, 0.0) for lbl in mid_labels]
+        outer_pcts  = [scores_outer .get(name,  {}).get(lbl, 0.0) for lbl in out_labels]
+        sector_scores[name] = {
+            "middle_pcts":  middle_pcts,
+            "outer_pcts":   outer_pcts,
+            "middle_labels": mid_labels,
+            "outer_labels":  out_labels,
+        }
+
+    # ----- 5.  FIGURA BASE ---------------------------------------------------------
+    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
+    ax  = fig.axes[0]
+
+    # ----- 4.  DIBUJO DE LOS ANILLOS ----------------------------------------------
+    for sector in circos.sectors:
+        name   = sector.name
+        colors = track_colors[name]
+        length = sector.size
+
+        middle_pcts = sector_scores[name]["middle_pcts"]
+        outer_pcts  = sector_scores[name]["outer_pcts"]
+
+        # ANILLO INNER (fondo del atributo)
+        t_inner = sector.add_track((r_inner_min, r_inner_max))
+        t_inner.rect(0, length, fc=colors["inner"], ec="white", lw=4)
+
+        # ANILLO MIDDLE (intangibles)
+        if middle_pcts:
+            blk = length / len(middle_pcts)
+            for i, pct in enumerate(middle_pcts):
+                start, end = i * blk, (i + 1) * blk
+                ratio = nz(pct) / 100.0
+                # Color lleno
+                if ratio > 0:
+                    t = sector.add_track((r_mid_min,
+                                        r_mid_min + (r_mid_max - r_mid_min) * ratio))
+                    t.rect(start, end, fc=colors["middle"], ec="white", lw=4)
+                # Color vacío
+                if ratio < 1:
+                    t = sector.add_track((r_mid_min + (r_mid_max - r_mid_min) * ratio,
+                                        r_mid_max))
+                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=4)
+
+        # ANILLO OUTER (indicadores)
+        if outer_pcts:
+            blk = length / len(outer_pcts)
+            for i, pct in enumerate(outer_pcts):
+                start, end = i * blk, (i + 1) * blk
+                ratio = nz(pct) / 100.0
+                # Lleno
+                if ratio > 0:
+                    t = sector.add_track((r_outer_min,
+                                        r_outer_min + (r_outer_max - r_outer_min) * ratio))
+                    t.rect(start, end, fc=colors["outer"], ec="white", lw=6)
+                # Vacío
+                if ratio < 1:
+                    t = sector.add_track((r_outer_min + (r_outer_max - r_outer_min) * ratio,
+                                        r_outer_max))
+                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=6)
+
+    # ----- 5.  FIGURA BASE ---------------------------------------------------------
+    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
+    ax  = fig.axes[0]
+
+
+    # ----- 8.  DISCO CENTRAL Y TEXTO “LUGAR” ---------------------------------------
+
+
+
+
+    # ----- 7.  MOSTRAR EN STREAMLIT ------------------------------------------------
+    st.pyplot(fig, use_container_width=True)
 
     # ===== INTERPRETACIÓN GENERAL (A): Después del diagrama =====
     st.markdown("---")
@@ -3831,19 +3939,31 @@ def pagina_resultados():
         "A4_total": A4_total,
         "global_score": global_score,
     }
-    save_pending = st.session_state.get("save_pending", False)
-    saved_to_sheet = st.session_state.get("saved_to_sheet", False)
-    if save_pending and not saved_to_sheet:
-        ok, msg = append_to_google_sheet(data)
-        if ok:
-            st.session_state["saved_to_sheet"] = True
-            st.success("Resultados guardados en Google Sheets.")
-        else:
-            st.warning(f"No se pudo guardar en Google Sheets: {msg}")
-        st.session_state["save_pending"] = False
-    elif save_pending and saved_to_sheet:
-        st.info("Resultados ya guardados en Google Sheets.")
-        st.session_state["save_pending"] = False
+
+    # ===== Guardado en Google Sheets (al hacer click en "Ver resultados") =====
+    if st.session_state.get("pending_submit"):
+        submission_id = st.session_state.get("submission_id")
+        if submission_id and submission_id != st.session_state.get("last_submitted_id"):
+            row = []
+            for col in SHEET_COLUMNS:
+                v = data.get(col, "")
+                row.append("" if v is None else v)
+            if not oauth_config_ready():
+                st.error(
+                    "Falta configuración de OAuth en `st.secrets`. "
+                    "Agrega `client_id`, `client_secret` y `redirect_uri`."
+                )
+            else:
+                ok, err = append_row_to_sheet(row)
+                if ok:
+                    st.session_state["pending_submit"] = False
+                    st.session_state["last_submitted_id"] = submission_id
+                    st.success("Resultados guardados en Google Sheets.")
+                elif err == "not_authorized":
+                    st.info("Conecta tu cuenta de Google para guardar los resultados.")
+                    st.link_button("Conectar Google", get_auth_url())
+                else:
+                    st.error("No se pudo guardar en Google Sheets. Intenta de nuevo.")
     df = pd.DataFrame([data])
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     safe_name = (nombre_lugar or "lugar").replace(" ", "_")
@@ -3856,7 +3976,7 @@ def pagina_resultados():
 
 
 # =========================================================
-# 10. NAVEGACIÓN ENTRE SECCIONES (TABS)
+# 10. NAVEGACIÓN ENTRE SECCIONES (SCROLL ÚNICO)
 # =========================================================
 sections = [
     ("Antes de empezar", pagina_antes),
@@ -3865,86 +3985,53 @@ sections = [
     ("Comodidad e Imagen", pagina_A3),
     ("Usos y Actividades", pagina_A4),
 ]
-tab_labels = [name for name, _ in sections] + ["Resultados"]
-st.markdown("<div id='tab_selector'></div>", unsafe_allow_html=True)
-st.markdown(
-    """
-    <style>
-    [data-baseweb="tab-list"] {
-        gap: 6px;
-        flex-wrap: wrap;
-        justify-content: flex-start;
-    }
-    [data-baseweb="tab"] {
-        border-radius: 999px !important;
-        padding: 6px 12px;
-        background: transparent;
-    }
-    [data-baseweb="tab"][aria-selected="true"] {
-        background: var(--space);
-        color: var(--white);
-    }
-    [data-baseweb="tab"]:not([aria-selected="true"]):hover {
-        color: var(--blue);
-    }
-    [data-baseweb="tab"][aria-selected="true"]:hover {
-        color: var(--white);
-    }
-    [data-baseweb="tab-highlight"] {
-        display: none !important;
-    }
-    .tab-selector-link,
-    .tab-selector-link:link,
-    .tab-selector-link:visited {
-        background-color: var(--space);
-        border: 1px solid var(--space);
-        color: var(--white) !important;
-        border-radius: 0.5rem;
-        padding: 0.35rem 0.9rem;
-        text-decoration: none !important;
-        display: inline-block;
-    }
-    .tab-selector-link:hover,
-    .tab-selector-link:active,
-    .tab-selector-link:focus {
-        background-color: var(--indigo);
-        border-color: var(--indigo);
-        color: var(--white) !important;
-        text-decoration: none !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-tabs = st.tabs(tab_labels)
+results_index = len(sections)
+step = st.session_state["step"]
 
-for tab, (_, render_section) in zip(tabs[: len(sections)], sections):
-    with tab:
-        render_section()
-        st.markdown(
-            "<div style='margin-top: 12px; text-align:center;'>"
-            "<a href='#tab_selector' class='tab-selector-link'>"
-            "Volver al selector de pestañas</a></div>",
-            unsafe_allow_html=True,
+# Render sections up to the current step (inclusive)
+visible_hasta = min(step, results_index - 1)
+sections_placeholder = st.empty()
+with sections_placeholder.container():
+    for idx in range(visible_hasta + 1):
+        st.markdown(f"<div id='sec_{idx}'></div>", unsafe_allow_html=True)
+        sections[idx][1]()
+    if step >= results_index:
+        st.markdown("<div id='resultados'></div>", unsafe_allow_html=True)
+        pagina_resultados()
+
+st.markdown("---")
+nav_placeholder = st.empty()
+with nav_placeholder.container():
+    cols_nav = st.columns(2)
+    with cols_nav[0]:
+        st.button(
+            "Volver a sección anterior",
+            on_click=go_prev_section,
+            disabled=(step == 0),
+            key="btn_prev",
         )
+    with cols_nav[1]:
+        if step < results_index - 1:
+            st.button(
+                "Siguiente sección",
+                on_click=lambda: go_next_section(results_index),
+                key="btn_next",
+            )
+        elif step == results_index - 1:
+            st.button(
+                "Ver resultados",
+                on_click=lambda: go_results(results_index),
+                key="btn_results",
+            )
+        else:
+            st.button(
+                "Ver resultados",
+                disabled=True,
+                key="btn_results_disabled",
+            )
 
-with tabs[-1]:
-    st.button(
-        "Guardar resultados en Google Sheets",
-        on_click=trigger_save_to_sheet,
-        key="btn_save_results",
-        use_container_width=True,
-    )
-    pagina_resultados()
-    st.button(
-        "Evaluar otro lugar",
-        on_click=reset_evaluacion,
-        key="btn_restart",
-        use_container_width=True,
-    )
-    st.markdown(
-        "<div style='margin-top: 12px; text-align:center;'>"
-        "<a href='#tab_selector' class='tab-selector-link'>"
-        "Volver al selector de pestañas</a></div>",
-        unsafe_allow_html=True,
-    )
+# Scroll to target section if requested
+scroll_target = st.session_state.get("scroll_target")
+if scroll_target:
+    scroll_to_here(200, key=scroll_target)
+    st.session_state["scroll_target"] = None
