@@ -1,9 +1,0 @@
-[theme]
-base = "light"
-primaryColor = "#4b295e"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
-font = "Poppins"
-
-# You can tweak the colors above to match the app's CSS palette.
