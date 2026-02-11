@@ -529,3 +529,102 @@ div[data-testid="stNumberInput"] button:focus svg {
     border-color: #4f46e5 !important;
 }
 
+/* =========================================================
+   MOBILE + DEVICE DARK MODE: FORCE LIGHT VISUALS
+   Put this block at the END of style.css
+   ========================================================= */
+@media (max-width: 768px) and (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: light !important; /* force light controls */
+  }
+
+  html, body,
+  .stApp,
+  [data-testid="stAppViewContainer"],
+  [data-testid="stMain"],
+  [data-testid="stAppViewBlockContainer"] {
+    background: var(--offwhite) !important;
+    color: var(--space) !important;
+  }
+
+  [data-testid="stSidebar"] {
+    background: #ffffff !important;
+    color: var(--space) !important;
+  }
+
+  /* Text */
+  h1, h2, h3, h4, h5, h6,
+  p, span, label, li,
+  .stMarkdown, [data-testid="stMarkdownContainer"] * {
+    color: var(--space) !important;
+  }
+
+  /* Inputs/selects */
+  .stTextInput input,
+  .stNumberInput input,
+  .stTextArea textarea,
+  .stDateInput input,
+  div[data-baseweb="input"] input,
+  div[data-baseweb="base-input"] input,
+  div[data-baseweb="select"] > div {
+    background: #ffffff !important;
+    color: var(--space) !important;
+    -webkit-text-fill-color: var(--space) !important;
+    border-color: #cbd5e1 !important;
+  }
+
+  .stTextInput input::placeholder,
+  .stNumberInput input::placeholder,
+  .stTextArea textarea::placeholder {
+    color: #64748b !important;
+    opacity: 1 !important;
+  }
+
+  /* Buttons */
+  .stButton > button,
+  .stDownloadButton > button,
+  [data-testid="stLinkButton"] > a {
+    background: var(--space) !important;
+    color: #ffffff !important;
+    border-color: var(--space) !important;
+  }
+
+  .stButton > button:hover,
+  .stDownloadButton > button:hover,
+  [data-testid="stLinkButton"] > a:hover {
+    background: var(--indigo) !important;
+    color: #ffffff !important;
+    border-color: var(--indigo) !important;
+  }
+
+  /* Tabs */
+  [data-baseweb="tab"] {
+    color: var(--space) !important;
+  }
+  [data-baseweb="tab"][aria-selected="true"] {
+    background: var(--space) !important;
+    color: #ffffff !important;
+  }
+
+  /* Tables */
+  .stTable, .stTable table {
+    background: #ffffff !important;
+    color: var(--space) !important;
+  }
+  .stTable thead th {
+    background: var(--indigo) !important;
+    color: #ffffff !important;
+  }
+  .stTable tbody td {
+    color: var(--space) !important;
+    background: #ffffff !important;
+  }
+
+  /* Radio / checkbox text */
+  .stRadio label, .stCheckbox label,
+  .stRadio p, .stCheckbox p {
+    color: var(--space) !important;
+  }
+}
+
+
