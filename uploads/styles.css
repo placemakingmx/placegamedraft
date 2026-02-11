@@ -270,31 +270,38 @@ h1, h2, h3, h4, h5, h6,
   + div span {
   color: var(--indigo);
 }
-/* ================= SLIDER STREAMLIT — SOLO COLORES ================= */
-
-/* 1. Thumb (bolita) */
-div[role="slider"] {
-  background-color: #685BC7 !important;       /* bolita índigo */
-  border: 2px solid #685BC7 !important;       /* borde índigo */
-  box-shadow: 0 0 0 0.25rem rgba(104, 91, 199, 0.35) !important;  /* halo morado */
-  outline: none !important;
+/* ===== Slider: tramo activo morado ===== */
+:root {
+  --slider-purple: #685BC7;
+  --slider-neutral: #D6D9E3; /* tramo no activo */
 }
 
-/* 2. Burbuja del número (19, 59, etc.) */
-div[data-testid="stSliderThumbValue"] {
-  background-color: #685BC7 !important;  /* fondo índigo */
-  color: #F4EFE2 !important;             /* texto claro */
-  border-radius: 999px !important;
-  padding: 0.1rem 0.5rem !important;
+/* Bolita */
+div[data-testid="stSlider"] div[role="slider"] {
+  background-color: var(--slider-purple) !important;
+  border: 2px solid var(--slider-purple) !important;
+  box-shadow: 0 0 0 0.22rem rgba(104, 91, 199, 0.28) !important;
 }
 
-   /* Barra del slider: tramo seleccionado y no seleccionado en índigo */
-   div.stSlider.st-emotion-cache-igqoeg.e10fdlpp0
-     div.st-emotion-cache-1rr4qq7.e10fdlpp3
-     > div[style*="0.25rem"] {
-     /* Recoloreamos lo que pinte Streamlit */
-     filter: hue-rotate(250deg) saturate(1.2);
-   }
+/* Burbuja del valor */
+div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
+  background-color: var(--slider-purple) !important;
+  border-color: var(--slider-purple) !important;
+}
+div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {
+  color: #fff !important;
+}
+
+/* Barra: no activo neutro */
+div[data-testid="stSlider"] [data-baseweb="slider"] > div > div {
+  background-color: var(--slider-neutral) !important;
+}
+
+/* Barra: activo morado */
+div[data-testid="stSlider"] [data-baseweb="slider"] > div > div > div {
+  background-color: var(--slider-purple) !important;
+}
+
    
    /* ===================== DROPDOWNS (SELECTBOX / MULTISELECT) ===================== */
 
