@@ -668,4 +668,30 @@ div[data-testid="stNumberInput"] button:focus svg {
   }
 }
 
+/* ===== PATCH: slider morado (685BC7), sin rojo ===== */
+:root {
+  --slider-purple: #685BC7;
+}
+
+/* Bolita */
+div[data-testid="stSlider"] div[role="slider"] {
+  background-color: var(--slider-purple) !important;
+  border: 2px solid var(--slider-purple) !important;
+  box-shadow: 0 0 0 0.22rem rgba(104, 91, 199, 0.28) !important;
+}
+
+/* Burbuja del valor */
+div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
+  background-color: var(--slider-purple) !important;
+  border-color: var(--slider-purple) !important;
+}
+div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {
+  color: #ffffff !important;
+}
+
+/* Barra del slider (evita tono rojo) */
+div[data-testid="stSlider"] div[style*="height: 0.25rem"] {
+  background-color: var(--slider-purple) !important;
+}
+
 
