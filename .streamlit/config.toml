@@ -1,0 +1,15 @@
+[theme]
+base = "light"
+
+# Colores base del tema Streamlit
+primaryColor = "#685BC7"          # Blue / Cerulean
+backgroundColor = "#F4EFE2"       # White (off-white)
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0D0D52"             # Space (texto principal)
+
+# Opcional: bordes rectos
+baseRadius = 0
+buttonRadius = 0
+
+[client]
+toolbarMode = "viewer"
