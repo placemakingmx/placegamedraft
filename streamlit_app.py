@@ -132,6 +132,47 @@ cargar_css_local(CSS_PATH)
 if LOGO_PATH.exists():
     st.image(str(LOGO_PATH), width=170)
 
+st.markdown(
+    """
+    <style>
+    @media (max-width: 900px) and (prefers-color-scheme: dark) {
+      /* Buttons (except tabs) */
+      .stButton > button,
+      .stButton > button p,
+      .stButton > button span,
+      .stDownloadButton > button,
+      .stDownloadButton > button p,
+      .stDownloadButton > button span,
+      [data-testid="stLinkButton"] > a,
+      [data-testid="stLinkButton"] > a p,
+      [data-testid="stLinkButton"] > a span {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+      }
+
+      /* Selected tab label */
+      [data-baseweb="tab"][aria-selected="true"],
+      [data-baseweb="tab"][aria-selected="true"] *,
+      button[role="tab"][aria-selected="true"],
+      button[role="tab"][aria-selected="true"] * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+      }
+
+      /* Dropdown selected value + options */
+      div[data-baseweb="select"] span,
+      div[data-baseweb="select"] input,
+      [data-baseweb="popover"] [role="option"],
+      [data-baseweb="menu"] [role="option"] {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+      }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ──────────────────────────────────────────
 # 3. Estado y navegación
 # ──────────────────────────────────────────
