@@ -1,15 +1,72 @@
 import os
+import csv
+import sys
+import subprocess
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
+from io import StringIO
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from pycirclize import Circos
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit.errors import StreamlitSecretNotFoundError
-import gspread
+
+PLOTLY_AVAILABLE = True
+PLOTLY_ERROR = None
+try:
+    import plotly.express as px
+except ModuleNotFoundError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "plotly"])
+        import plotly.express as px
+    except Exception as exc:
+        PLOTLY_AVAILABLE = False
+        PLOTLY_ERROR = exc
+        px = None
+
+MATPLOTLIB_AVAILABLE = True
+MATPLOTLIB_ERROR = None
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+except ModuleNotFoundError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "matplotlib"])
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+    except Exception as exc:
+        MATPLOTLIB_AVAILABLE = False
+        MATPLOTLIB_ERROR = exc
+        plt = None
+        font_manager = None
+
+PYCIRCLIZE_AVAILABLE = True
+PYCIRCLIZE_ERROR = None
+try:
+    from pycirclize import Circos
+except ModuleNotFoundError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pycirclize"])
+        from pycirclize import Circos
+    except Exception as exc:
+        PYCIRCLIZE_AVAILABLE = False
+        PYCIRCLIZE_ERROR = exc
+        Circos = None
+
+GSPREAD_AVAILABLE = True
+GSPREAD_ERROR = None
+try:
+    import gspread
+except ModuleNotFoundError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "gspread"])
+        import gspread
+    except Exception as exc:
+        GSPREAD_AVAILABLE = False
+        GSPREAD_ERROR = exc
+        gspread = None
 
 def get_value(ans, key, na_key=None, cast=float, scale=1.0):
     if na_key and ans.get(na_key):
@@ -80,6 +137,12 @@ def _get_sheet_config() -> tuple[str | None, str]:
 
 
 def append_to_google_sheet(row_data: dict) -> tuple[bool, str]:
+    if not GSPREAD_AVAILABLE:
+        detail = f" Detalle técnico: {GSPREAD_ERROR}" if GSPREAD_ERROR else ""
+        return False, (
+            "No se pudo cargar gspread en el entorno actual. "
+            f"Instala con: {sys.executable} -m pip install gspread.{detail}"
+        )
     sheet_url, sheet_tab = _get_sheet_config()
     if not sheet_url:
         return False, "Falta GOOGLE_SHEET_URL en st.secrets o variables de entorno."
@@ -131,47 +194,6 @@ cargar_css_local(CSS_PATH)
 
 if LOGO_PATH.exists():
     st.image(str(LOGO_PATH), width=170)
-
-st.markdown(
-    """
-    <style>
-    @media (max-width: 900px) and (prefers-color-scheme: dark) {
-      /* Buttons (except tabs) */
-      .stButton > button,
-      .stButton > button p,
-      .stButton > button span,
-      .stDownloadButton > button,
-      .stDownloadButton > button p,
-      .stDownloadButton > button span,
-      [data-testid="stLinkButton"] > a,
-      [data-testid="stLinkButton"] > a p,
-      [data-testid="stLinkButton"] > a span {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-      }
-
-      /* Selected tab label */
-      [data-baseweb="tab"][aria-selected="true"],
-      [data-baseweb="tab"][aria-selected="true"] *,
-      button[role="tab"][aria-selected="true"],
-      button[role="tab"][aria-selected="true"] * {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-      }
-
-      /* Dropdown selected value + options */
-      div[data-baseweb="select"] span,
-      div[data-baseweb="select"] input,
-      [data-baseweb="popover"] [role="option"],
-      [data-baseweb="menu"] [role="option"] {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-      }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 # ──────────────────────────────────────────
 # 3. Estado y navegación
@@ -1399,6 +1421,36 @@ def nz(x, default=0.0):
     return default if x is None else x
 
 
+def impute_missing_with_penalty(
+    indicators: dict[str, float | None],
+    penalty: float = 40.0,
+) -> dict[str, float]:
+    """
+    Imputa valores None usando el promedio de los demás indicadores menos una penalización fija.
+    """
+    available = {k: v for k, v in indicators.items() if v is not None}
+    missing_keys = [k for k, v in indicators.items() if v is None]
+
+    if not missing_keys:
+        return {k: float(v) for k, v in available.items()}
+
+    if not available:
+        return {k: 20.0 for k in indicators.keys()}
+
+    avg_available = sum(available.values()) / len(available)
+    imputed_value = avg_available - penalty
+    imputed_value = max(20.0, imputed_value)
+
+    result = {}
+    for key, value in indicators.items():
+        if value is not None:
+            result[key] = float(value)
+        else:
+            result[key] = imputed_value
+
+    return result
+
+
 def get_indicator_weights(program_id: str, attribute_id: str, indicators: dict) -> dict:
     """Pesos de indicadores de un atributo para un programa dado."""
     program_cfg = PROGRAM_CONFIG.get(program_id, {})
@@ -1422,18 +1474,23 @@ def get_section_weights(program_id: str) -> dict:
 
 
 def compute_attribute_total(program_id: str, attribute_id: str, indicators: dict) -> float:
-    """Promedio ponderado de indicadores (0–100) de un atributo."""
+    """
+    MEJORADO: Imputa valores None usando promedio de hermanos - 40 puntos.
+    Promedio ponderado de indicadores (0–100) de un atributo.
+    """
     if not indicators:
         return 0.0
-    weights = get_indicator_weights(program_id, attribute_id, indicators)
+
+    indicators_imputed = impute_missing_with_penalty(indicators, penalty=40.0)
+
+    weights = get_indicator_weights(program_id, attribute_id, indicators_imputed)
     num = 0.0
     den = 0.0
-    for ind_id, value in indicators.items():
-        if value is None:
-            continue
+    for ind_id, value in indicators_imputed.items():
         w = weights.get(ind_id, 1.0)
         num += w * value
         den += w
+
     return num / den if den > 0 else 0.0
 
 
@@ -1446,9 +1503,15 @@ def compute_section_scores(A1_total: float, A2_total: float, A3_total: float, A4
         "Usos": A4_total,
     }
 
-
-def compute_global_score(program_id: str, section_scores: dict) -> float:
-    """Score global ponderado por sección según el programa."""
+def compute_global_score(
+    program_id: str,
+    section_scores: dict,
+    sostenible_score: float | None = None,
+    sostenible_weight: float = 0.15,
+    conmemorativo_score: float | None = None,
+    conmemorativo_weight: float = 0.10,
+) -> float:
+    """Score global ponderado por sección según el programa, con ajustes opcionales por intangibles."""
     if not section_scores:
         return 0.0
     section_weights = get_section_weights(program_id)
@@ -1460,7 +1523,28 @@ def compute_global_score(program_id: str, section_scores: dict) -> float:
         w = section_weights.get(section, 0.0)
         num += w * value
         den += w
-    return num / den if den > 0 else 0.0
+    base_score = num / den if den > 0 else 0.0
+
+    has_sostenible = sostenible_score is not None
+    has_conmemorativo = conmemorativo_score is not None
+    if not has_sostenible and not has_conmemorativo:
+        return base_score
+
+    ws = max(0.0, min(1.0, sostenible_weight if has_sostenible else 0.0))
+    wc = max(0.0, min(1.0, conmemorativo_weight if has_conmemorativo else 0.0))
+
+    total_intangible_weight = ws + wc
+    if total_intangible_weight > 1.0:
+        ws = ws / total_intangible_weight
+        wc = wc / total_intangible_weight
+
+    wb = 1.0 - ws - wc
+    result = wb * base_score
+    if has_sostenible:
+        result += ws * float(sostenible_score)
+    if has_conmemorativo:
+        result += wc * float(conmemorativo_score)
+    return result
 
 
 # =========================================================
@@ -1579,7 +1663,17 @@ def calc_A1_2(a12_1, a12_2_1, a12_2_2, a12_3):
 def calc_A1_3(a12_1, a13_1, a12_2_1, a12_2_2):
     # Caso con redes
     if a12_1 != 1:
-        return score_1_4_100_75_50_25(a13_1)
+        estado = score_1_4_100_75_50_25(a13_1)
+        cuidado_redes = score_1_3_100_50_10(a12_2_1)
+
+        if estado is None and cuidado_redes is None:
+            return None
+        if estado is None:
+            return cuidado_redes
+        if cuidado_redes is None:
+            return estado
+
+        return 0.65 * estado + 0.35 * cuidado_redes
     # Caso sin redes: se toma estado físico y se penaliza 30%
     base = score_1_4_100_75_50_25(a12_2_2)
     if base is None:
@@ -1606,17 +1700,19 @@ def calc_A1_5(a12_3, a15_1, a15_2):
 
 
 def calc_intangibles_A1(A1_1, A1_2, A1_3, A1_4, A1_5):
+    """Calcula intangibles con promedios simples. Los None se manejan con imputación posterior."""
     A1_1 = nz(A1_1)
     A1_2 = nz(A1_2)
     A1_3 = nz(A1_3)
     A1_4 = nz(A1_4)
     A1_5 = nz(A1_5)
+
     return {
         "Diversidad": A1_1,
         "Cuidado": 0.34 * A1_1 + 0.33 * A1_2 + 0.33 * A1_4,
         "Comunidad": 0.5 * A1_2 + 0.5 * A1_3,
         "Compartido": A1_2,
-        "Símbolos": A1_2,
+        "Símbolos": 0.5 * A1_2 + 0.5 * A1_3,
         "Orgullo": A1_3,
         "Amigable": A1_5,
         "Interactivo": A1_5,
@@ -1658,15 +1754,21 @@ def calc_A2_1(a_walk, a_bike, a_pt, a_car, a21_2):
 
 def calc_A2_2(a22_1, a22_2, a22_3):
     S221 = score_1_3_100_50_10(a22_1)
-    S222 = score_1_3_10_50_100(a22_2)
+    S222 = score_1_3_10_50_100(a22_2) if a22_2 is not None else None
     if a22_3 == 1:
         S223 = 100.0
     elif a22_3 == 2:
         S223 = 50.0
     else:
         S223 = None
-    if None in (S221, S222, S223):
+
+    S221 = nz(S221)
+    S222 = nz(S222)
+    S223 = nz(S223)
+
+    if S221 == 0 and S222 == 0 and S223 == 0:
         return None
+
     return 0.5 * S221 + 0.2 * S222 + 0.3 * S223
 
 
@@ -1690,14 +1792,21 @@ def calc_A2_5(a25_1, a25_2, a25_3):
     S251 = score_1_3_100_50_10(a25_1)
     S252 = a25_2
     S253 = score_1_3_100_50_10(a25_3)
+
+    # Si todos son None, retornar None
     if S251 is None and S253 is None and S252 is None:
         return None
+
+    # Si S252 es None, usar solo S251 y S253
     if S252 is None:
         if S251 is None or S253 is None:
             return None
         return 0.75 * S251 + 0.25 * S253
+
+    # Si alguno de S251 o S253 es None, retornar None
     if S251 is None or S253 is None:
         return None
+
     return 0.5 * S251 + 0.3 * S252 + 0.2 * S253
 
 
@@ -1714,6 +1823,7 @@ def calc_A2_6(a26_1_p, a26_2, a26_2_1):
 
 
 def calc_intangibles_A2(A2_1, A2_2, A2_3, A2_4, A2_5, A2_6, A3_4):
+    """Calcula intangibles con promedios simples. Los None se manejan con imputación posterior."""
     A2_1 = nz(A2_1)
     A2_2 = nz(A2_2)
     A2_3 = nz(A2_3)
@@ -1721,6 +1831,7 @@ def calc_intangibles_A2(A2_1, A2_2, A2_3, A2_4, A2_5, A2_6, A3_4):
     A2_5 = nz(A2_5)
     A2_6 = nz(A2_6)
     A3_4 = nz(A3_4)
+
     return {
         "Cercano": 0.5 * A2_1 + 0.5 * A2_2,
         "Conectado": 0.5 * A2_1 + 0.5 * A2_2,
@@ -1780,6 +1891,7 @@ def calc_A3_7(a37_1):
 
 
 def calc_intangibles_A3(A3_1, A3_2, A3_3, A3_4, A3_5, A3_6, A3_7):
+    """Calcula intangibles con promedios simples. Los None se manejan con imputación posterior."""
     A3_1 = nz(A3_1)
     A3_2 = nz(A3_2)
     A3_3 = nz(A3_3)
@@ -1787,6 +1899,7 @@ def calc_intangibles_A3(A3_1, A3_2, A3_3, A3_4, A3_5, A3_6, A3_7):
     A3_5 = nz(A3_5)
     A3_6 = nz(A3_6)
     A3_7 = nz(A3_7)
+
     return {
         "Limpio": A3_1,
         "Seguro": A3_1,
@@ -1885,10 +1998,17 @@ def calc_A4_6(S461, S462, A1_1):
 
 def calc_A4_4(A0_3, a44_1, a44_2, A4_1, A4_2, A4_3, A4_5, A4_6):
     if A0_3 == 1:
-        S441 = score_A4_4_1(a44_1)
-        S442 = score_A4_4_2(a44_2)
-        if S441 is None or S442 is None:
+        # Rama enlace/responsable
+        S441 = score_A4_4_1(a44_1) if a44_1 is not None else None
+        S442 = score_A4_4_2(a44_2) if a44_2 is not None else None
+
+        if S441 is None and S442 is None:
             return None
+        if S441 is None:
+            return S442
+        if S442 is None:
+            return S441
+
         return 0.4 * S441 + 0.6 * S442
     else:
         vals = [v for v in [A4_1, A4_2, A4_3, A4_5, A4_6] if v is not None]
@@ -1897,24 +2017,29 @@ def calc_A4_4(A0_3, a44_1, a44_2, A4_1, A4_2, A4_3, A4_5, A4_6):
         return sum(vals) / len(vals)
 
 
-def calc_intangibles_A4(A4_1, A4_2, A4_3, A4_4, A4_5, A4_6):
+def calc_intangibles_A4(A4_1, A4_2, A4_3, A4_4, A4_5, A4_6, A1_2, A1_3, A3_6, A3_agradable):
+    """Calcula intangibles A4. Los None se manejan con imputación posterior."""
     A4_1 = nz(A4_1)
     A4_2 = nz(A4_2)
     A4_3 = nz(A4_3)
     A4_4 = nz(A4_4)
     A4_5 = nz(A4_5)
     A4_6 = nz(A4_6)
+    A1_2 = nz(A1_2)
+    A1_3 = nz(A1_3)
+    A3_6 = nz(A3_6)
+    A3_agradable = nz(A3_agradable)
+
     return {
         "Dinámico": 0.34 * A4_1 + 0.33 * A4_5 + 0.33 * A4_6,
         "Especial": 0.5 * A4_1 + 0.5 * A4_2,
         "Real": 0.5 * A4_2 + 0.5 * A4_3,
         "Útil": 0.5 * A4_2 + 0.5 * A4_3,
         "Local": 0.33 * A4_4 + 0.34 * A4_5 + 0.33 * A4_6,
-        "Sostenible": A4_4,
-        "Conmemorativo": A4_4,
-        "Comunidad": A4_6,
+        "Sostenible": 0.40 * A1_2 + 0.30 * A1_3 + 0.30 * A3_6,
+        "Conmemorativo": 0.34 * A4_2 + 0.33 * A4_6 + 0.33 * A3_agradable,
+        "Pertenencia": A4_6,
     }
-
 
 # =========================================================
 # 7. HELPER PARA MOSTRAR INFO GEOGRÁFICA
@@ -1947,12 +2072,72 @@ def mostrar_info_geografica():
         st.markdown(f"[Ver en Google Maps]({gmaps_url})")
 
 
+def format_score_with_na(value: float | None) -> str:
+    """
+    Formatea un score indicando claramente si es NA.
+
+    Args:
+        value: Score de 0-100 o None
+
+    Returns:
+        String formateado: "85.3" o "Sin datos"
+    """
+    if value is None:
+        return "Sin datos"
+    return f"{value:.1f}"
+
+
 # =========================================================
 # 8. PÁGINAS (PASO A PASO)
 # =========================================================
 st.title("Diagrama de Lugar")
 # ANCLA AL INICIO DE LA APP
 st.markdown("<div id='top-of-page'></div>", unsafe_allow_html=True)
+
+
+def render_floating_back_to_top() -> None:
+    """Botón flotante fijo a la derecha para volver arriba sin disparar reruns."""
+    components.html(
+        """
+        <script>
+        (function () {
+            const BTN_ID = 'floating-tab-selector-btn';
+            const doc = window.parent.document;
+
+            // Limpia instancias previas (incluyendo versiones antiguas sin id estable)
+            const legacy = doc.querySelectorAll(
+                '#floating-tab-selector-btn, #tab-selector-singleton-btn, [data-floating-tab-selector="1"]'
+            );
+            legacy.forEach((el) => el.remove());
+
+            const oldAnchors = Array.from(doc.querySelectorAll('a[href="#tab_selector"], a[href="#top-of-page"]'));
+            oldAnchors
+                .filter((el) => (el.textContent || '').trim() === 'Volver al selector de pestañas')
+                .forEach((el) => el.remove());
+
+            const btn = doc.createElement('a');
+            btn.id = BTN_ID;
+            btn.setAttribute('data-floating-tab-selector', '1');
+            btn.href = '#tab_selector';
+            btn.textContent = 'Volver al selector de pestañas';
+            btn.style.position = 'fixed';
+            btn.style.right = '20px';
+            btn.style.bottom = '20px';
+            btn.style.zIndex = '9999';
+            btn.style.backgroundColor = 'var(--space)';
+            btn.style.border = '1px solid var(--space)';
+            btn.style.color = 'var(--white)';
+            btn.style.borderRadius = '0.5rem';
+            btn.style.padding = '0.45rem 0.9rem';
+            btn.style.textDecoration = 'none';
+            btn.style.display = 'inline-block';
+
+            doc.body.appendChild(btn);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 def pagina_antes():
     answers = st.session_state.setdefault("answers", {})
@@ -2191,33 +2376,39 @@ def pagina_A1():
         },
     )
 
+    redes_sin_grupos_container = st.empty()
+    redes_con_grupos_container = st.empty()
     if a12_1 == 1:
         # NO hay grupos organizados → solo se pregunta a12_2_2
         clear_branch("a12_2_1")
-        radio_answer(
-            "a12_2_2",
-            "¿Cómo valorarías el estado físico del lugar?",
-            options=[1, 2, 3, 4],
-            labels_map={
-                1: "Muy bien cuidado, parece nuevo",
-                2: "En buenas condiciones",
-                3: "Descuidado",
-                4: "En muy malas condiciones",
-            },
-        )
+        redes_con_grupos_container.empty()
+        with redes_sin_grupos_container.container():
+            radio_answer(
+                "a12_2_2",
+                "¿Cómo valorarías el estado físico del lugar?",
+                options=[1, 2, 3, 4],
+                labels_map={
+                    1: "Muy bien cuidado, parece nuevo",
+                    2: "En buenas condiciones",
+                    3: "Descuidado",
+                    4: "En muy malas condiciones",
+                },
+            )
     else:
         # SÍ hay grupos organizados → solo se pregunta a12_2_1
         clear_branch("a12_2_2")
-        radio_answer(
-            "a12_2_1",
-            "¿Se encargan estos grupos de cuidar el lugar?",
-            options=[1, 2, 3],
-            labels_map={
-                1: "Sí",
-                2: "Ocasionalmente",
-                3: "No",
-            },
-        )
+        redes_sin_grupos_container.empty()
+        with redes_con_grupos_container.container():
+            radio_answer(
+                "a12_2_1",
+                "¿Se encargan estos grupos de cuidar el lugar?",
+                options=[1, 2, 3],
+                labels_map={
+                    1: "Sí",
+                    2: "Ocasionalmente",
+                    3: "No",
+                },
+            )
 
     radio_answer(
         "a12_3",
@@ -2227,11 +2418,13 @@ def pagina_A1():
     )
 
     # ---------------------- VOLUNTARIADO / CUIDADO DEL LUGAR ----------------------
+    cuidado_a1_container = st.empty()
     if a12_1 == 1:
         # Si NO hay redes: usamos el mismo valor de estado físico (a12_2_2) como proxy
         a12_2_2_val = get_ans("a12_2_2")
         set_ans("a13_1", a12_2_2_val)
         set_ans("a14_1", a12_2_2_val)
+        cuidado_a1_container.empty()
 
         # Importante: limpiar posibles widgets no visibles
         clear_branch("a13_1")  # a13_1 NO se captura con widget en esta rama
@@ -2239,56 +2432,74 @@ def pagina_A1():
         set_ans("a13_1", a12_2_2_val)
 
     else:
-        st.markdown("**Voluntariado**")
+        with cuidado_a1_container.container():
+            st.markdown("**Cuidado**")
 
-        # En esta rama, a13_1 se captura por widget y a14_1 se deriva
-        a13_1_val = radio_answer(
-            "a13_1",
-            "¿Cómo valorarías el estado físico del lugar?",
-            options=[1, 2, 3, 4],
-            labels_map={
-                1: "Muy bien cuidado, parece nuevo",
-                2: "En buenas condiciones",
-                3: "Descuidado",
-                4: "En muy malas condiciones",
-            },
-        )
+            # En esta rama, a13_1 se captura por widget y a14_1 se deriva
+            a13_1_val = radio_answer(
+                "a13_1",
+                "¿Cómo valorarías el estado físico del lugar?",
+                options=[1, 2, 3, 4],
+                labels_map={
+                    1: "Muy bien cuidado, parece nuevo",
+                    2: "En buenas condiciones",
+                    3: "Descuidado",
+                    4: "En muy malas condiciones",
+                },
+            )
         set_ans("a14_1", a13_1_val)
 
     # ---------------------- USO NOCTURNO ----------------------
     st.markdown("**Uso nocturno**")
-    a15_1 = radio_answer(
-        "a15_1",
-        "¿Alguno de estos grupos lo utilizan habitualmente por las tardes/noches (después de las 18:00)?",
-        options=[1, 2, 3],
-        labels_map={
-            1: "Sí",
-            2: "No",
-            3: "No se sabe",
-        },
-    )
-    if a15_1 == 1:
-        # Si hay uso nocturno, a15_2 no aplica
-        clear_branch("a15_2")
-        set_ans("a15_2", 1)  # lógica interna: "siempre hay gente"
+    uso_nocturno_grupos_container = st.empty()
+    uso_nocturno_horario_container = st.empty()
+
+    def _render_a15_2():
+        radio_answer(
+            "a15_2",
+            "¿Crees que el lugar se utiliza únicamente durante el día, o hay algunas personas usándolo después de las 18:00?",
+            options=[1, 2, 3, 4],
+            labels_map={
+                1: "Sí, siempre hay gente usando el lugar",
+                2: "Hay muy pocas personas cuando oscurece",
+                3: "No hay nadie después de las 18:00",
+                4: "No lo sé",
+            },
+        )
+
+    if a12_1 == 1:
+        # Sin grupos: mostrar solo pregunta general de uso nocturno.
+        clear_branch("a15_1")
+        set_ans("a15_1", None)
+        uso_nocturno_grupos_container.empty()
+        with uso_nocturno_horario_container.container():
+            _render_a15_2()
     else:
-        # Si no hay uso nocturno (o no se sabe), a15_2 sí aplica
-        if a15_1 in (2, 3):
-            radio_answer(
-                "a15_2",
-                "¿Crees que el lugar se utiliza únicamente durante el día, o hay algunas personas usándolo después de las 18:00?",
-                options=[1, 2, 3, 4],
+        with uso_nocturno_grupos_container.container():
+            a15_1 = radio_answer(
+                "a15_1",
+                "¿Alguno de estos grupos lo utilizan habitualmente por las tardes/noches (después de las 18:00)?",
+                options=[1, 2, 3],
                 labels_map={
-                    1: "Sí, siempre hay gente usando el lugar",
-                    2: "Hay muy pocas personas cuando oscurece",
-                    3: "No hay nadie después de las 18:00",
-                    4: "No lo sé",
+                    1: "Sí",
+                    2: "No",
+                    3: "No se sabe",
                 },
             )
+
+        if a15_1 == 1:
+            # Si respondió "Sí", no mostrar pregunta general.
+            clear_branch("a15_2")
+            set_ans("a15_2", 1)  # lógica interna: "siempre hay gente"
+            uso_nocturno_horario_container.empty()
+        elif a15_1 in (2, 3):
+            with uso_nocturno_horario_container.container():
+                _render_a15_2()
         else:
             # Caso defensivo: si a15_1 es None
             clear_branch("a15_2")
-            set_ans("a15_2", None)
+            set_ans("a15_2", 1)
+            uso_nocturno_horario_container.empty()
 
 def pagina_A2():
     st.markdown('<div id="header_conexiones"></div>', unsafe_allow_html=True)
@@ -2303,36 +2514,50 @@ def pagina_A2():
         labels_map={1: "Sí", 2: "No"},
     )
 
+    modos_percent_container = st.empty()
+    modos_majority_container = st.empty()
     if a21_use_percent == 1:
         # Rama con porcentajes → a21_2 no aplica
         clear_branch("a21_2")
+        modos_majority_container.empty()
 
-        slider_answer("a21_1_walk", "Porcentaje de personas que llega caminando", 0, 100)
-        slider_answer("a21_1_bike", "Porcentaje que llega en bicicleta", 0, 100)
-        slider_answer("a21_1_pt", "Porcentaje que llega en transporte público", 0, 100)
-        slider_answer("a21_1_car", "Porcentaje que llega en auto particular", 0, 100)
-
+        with modos_percent_container.container():
+            slider_answer("a21_1_walk", "Porcentaje de personas que llega caminando", 0, 100)
+            slider_answer("a21_1_bike", "Porcentaje que llega en bicicleta", 0, 100)
+            slider_answer("a21_1_pt", "Porcentaje que llega en transporte público", 0, 100)
+            slider_answer("a21_1_car", "Porcentaje que llega en auto particular", 0, 100)
     else:
         # Rama sin porcentajes → limpiar sliders + mostrar a21_2
         clear_branch("a21_1_walk", "a21_1_bike", "a21_1_pt", "a21_1_car")
+        modos_percent_container.empty()
 
-        radio_answer(
-            "a21_2",
-            "¿De qué forma llega la mayoría de las personas al lugar?",
-            options=[1, 2, 3, 4],
-            labels_map={
-                1: "En auto particular",
-                2: "En transporte público",
-                3: "En bicicleta o similares",
-                4: "Caminando",
-            },
-        )
+        with modos_majority_container.container():
+            radio_answer(
+                "a21_2",
+                "¿De qué forma llega la mayoría de las personas al lugar?",
+                options=[1, 2, 3, 4],
+                labels_map={
+                    1: "En auto particular",
+                    2: "En transporte público",
+                    3: "En bicicleta o similares",
+                    4: "Caminando",
+                },
+            )
 
     # ---------- Conectividad ----------
     st.markdown("**Percepción de conectividad con el lugar**")
     radio_answer("a22_1", "¿Es fácil llegar al lugar?", [1, 2, 3], {1: "Sí", 2: "Más o menos", 3: "No"})
     radio_answer("a22_2", "¿Sueles llegar en automóvil particular?", [1, 2, 3], {1: "Sí", 2: "A veces", 3: "No"})
+    a22_2_na = checkbox_answer("a22_2_na", "No aplica")
+    if a22_2_na:
+        clear_branch("a22_2")
+        set_ans("a22_2", None)
+
     radio_answer("a22_3", "¿Has cambiado a modos más sustentables tras la intervención?", [1, 2], {1: "Sí", 2: "No"})
+    a22_3_na = checkbox_answer("a22_3_na", "No aplica")
+    if a22_3_na:
+        clear_branch("a22_3")
+        set_ans("a22_3", None)
 
     # ---------- Permanencia ----------
     radio_answer(
@@ -2344,7 +2569,7 @@ def pagina_A2():
 
     # ---------- Accesibilidad del entorno ----------
     st.markdown("**Accesibilidad del entorno**")
-    slider_answer("a24_1", "Accesibilidad para PMR (0-100 %)", 0, 100)
+    slider_answer("a24_1", "Accesibilidad para personas con movilidad reducida (0-100 %)", 0, 100)
     checkbox_answer("a24_1_na", "No lo sé / Sin datos")
 
     st.link_button("Calculadora indicadores INEGI", "https://pmm-calculadora-indicadores.streamlit.app/")
@@ -2356,7 +2581,7 @@ def pagina_A2():
     st.markdown("**Accesibilidad dentro del lugar**")
     radio_answer(
         "a25_1",
-        "¿Hay infraestructura PMR dentro del lugar?",
+        "¿Hay infraestructura para personas con movilidad reducida dentro del lugar?",
         [1, 2, 3],
         {1: "Suficiente", 2: "Insuficiente", 3: "No hay"},
     )
@@ -2364,7 +2589,7 @@ def pagina_A2():
     checkbox_answer("a25_2_na", "Sin dato de conexión del entorno")
     radio_answer(
         "a25_3",
-        "¿Personas con PMR usan el lugar?",
+        "¿Personas con personas con movilidad reducida usan el lugar?",
         [1, 2, 3],
         {1: "Sí", 2: "A veces", 3: "No"},
     )
@@ -2373,26 +2598,29 @@ def pagina_A2():
     st.markdown("**Accesibilidad para primera infancia y cuidadores**")
     radio_answer(
         "a26_1_p",
-        "¿Hay áreas adecuadas para niñez <6 y cuidadores?",
+        "¿Hay áreas adecuadas para niñas y niños menores de 6 años y sus cuidadores?",
         [1, 2, 3],
         {1: "Sí, de calidad", 2: "Sí, pero limitadas", 3: "No existen"},
     )
     a26_2 = radio_answer("a26_2", "¿Eres cuidador/a actualmente?", [1, 2], {1: "Sí", 2: "No"})
+    followup_container = st.empty()
     if a26_2 == 1:
-        radio_answer(
-            "a26_2_1",
-            "Como cuidador/a, ¿qué tan satisfecho estás?",
-            [1, 2, 3],
-            {1: "Muy satisfecho", 2: "Aceptable", 3: "Insatisfecho"},
-        )
+        with followup_container.container():
+            radio_answer(
+                "a26_2_1",
+                "Como cuidador/a, ¿qué tan satisfecho estás?",
+                [1, 2, 3],
+                {1: "Muy satisfecho", 2: "Aceptable", 3: "Insatisfecho"},
+            )
     else:
+        # Para "No" (y cualquier estado inesperado), ocultar y limpiar explícitamente.
         clear_branch("a26_2_1")
         set_ans("a26_2_1", None)
-
+        followup_container.empty()
 
 def pagina_A3():
     st.markdown('<div id="header_comodidad"></div>', unsafe_allow_html=True)
-    st.header("Comodidad e imagen")
+    st.header("Comodidad e Imagen")
 
     # ---------------------- SENSACIÓN DE SEGURIDAD ----------------------
     st.markdown("**Sensación de seguridad y limpieza**")
@@ -2409,43 +2637,49 @@ def pagina_A3():
 
     # ---------------------- CUIDADO DE LA IMAGEN ----------------------
     st.markdown("**Cuidado de la imagen del lugar**")
+    cuidado_resp_container = st.empty()
+    cuidado_usuario_container = st.empty()
     if A0_3 == 1:
         # Rama equipo responsable → solo a32_2 visible, a32_1 se deriva
         clear_branch("a32_1")
+        cuidado_usuario_container.empty()
 
-        val_resp = radio_answer(
-            "a32_2",
-            "Como parte del equipo responsable, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
-            options=[1, 2, 3],
-            labels_map={
-                1: "Sí, parece nuevo",
-                2: "Está en muy buen estado",
-                3: "La verdad no, está en muy malas condiciones",
-            },
-        )
+        with cuidado_resp_container.container():
+            val_resp = radio_answer(
+                "a32_2",
+                "Como parte del equipo responsable, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
+                options=[1, 2, 3],
+                labels_map={
+                    1: "Sí, parece nuevo",
+                    2: "Está en muy buen estado",
+                    3: "La verdad no, está en muy malas condiciones",
+                },
+            )
         set_ans("a32_1", val_resp)
 
     else:
         # Rama usuario → solo a32_1 visible, a32_2 debe limpiarse
         clear_branch("a32_2")
+        cuidado_resp_container.empty()
 
-        radio_answer(
-            "a32_1",
-            "Como persona usuaria, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
-            options=[1, 2, 3],
-            labels_map={
-                1: "Sí, parece nuevo",
-                2: "Está en muy buen estado",
-                3: "La verdad no, está en muy malas condiciones",
-            },
-        )
+        with cuidado_usuario_container.container():
+            radio_answer(
+                "a32_1",
+                "Como persona usuaria, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
+                options=[1, 2, 3],
+                labels_map={
+                    1: "Sí, parece nuevo",
+                    2: "Está en muy buen estado",
+                    3: "La verdad no, está en muy malas condiciones",
+                },
+            )
         set_ans("a32_2", None)
 
     # ---------------------- COMODIDAD DEL LUGAR ----------------------
     st.markdown("**Comodidad del lugar**")
     radio_answer(
         "a33_1",
-        "¿Consideras que el lugar es lo suficientemente verde para ser cómodo a lo largo de todo el año?",
+        "¿Crees que las áreas verdes son adecuadas y suficientes para tu comodidad a lo largo del año?",
         options=[1, 2, 3],
         labels_map={
             1: "Sí, está genial",
@@ -2455,7 +2689,7 @@ def pagina_A3():
     )
     radio_answer(
         "a33_2",
-        "¿Crees que el mobiliario es lo suficientemente cómodo para usar el lugar durante todas las estaciones del año?",
+        "¿Crees que el mobiliario es lo suficientemente cómodo para usarse durante todas las estaciones del año?",
         options=[1, 2, 3],
         labels_map={
             1: "Sí, llueve, truene o relampaguee",
@@ -2492,27 +2726,30 @@ def pagina_A3():
 
     # ---------------------- RESILIENCIA CLIMÁTICA Y ÁREAS VERDES ----------------------
     st.markdown("**Resiliencia climática y áreas verdes**")
+    resiliencia_enlace_container = st.empty()
     if A0_3 == 1:
-        slider_answer(
-            "a36_1",
-            "¿Qué porcentaje del lugar está diseñado con materiales locales y poco contaminantes, amigables con el medio ambiente?",
-            0,
-            100,
-        )
-        checkbox_answer("a36_1_na", "No lo sé / No hay dato sobre materiales y diseño sostenible")
+        with resiliencia_enlace_container.container():
+            slider_answer(
+                "a36_1",
+                "¿Qué porcentaje del lugar está diseñado con materiales locales y poco contaminantes, amigables con el medio ambiente?",
+                0,
+                100,
+            )
+            checkbox_answer("a36_1_na", "No lo sé / No hay dato sobre materiales y diseño sostenible")
 
-        slider_answer(
-            "a36_2",
-            "¿Qué porcentaje del mobiliario está pensado para ser resiliente ante eventos climáticos extremos (lluvia intensa, calor extremo, tormentas, etc.)?",
-            0,
-            100,
-        )
-        checkbox_answer("a36_2_na", "No lo sé / No hay dato sobre resiliencia climática del mobiliario")
+            slider_answer(
+                "a36_2",
+                "¿Qué porcentaje del mobiliario está pensado para ser resiliente ante eventos climáticos extremos (lluvia intensa, calor extremo, tormentas, etc.)?",
+                0,
+                100,
+            )
+            checkbox_answer("a36_2_na", "No lo sé / No hay dato sobre resiliencia climática del mobiliario")
 
     else:
         # Si no es enlace, NO mostrar y limpiar todo
         clear_branch("a36_1", "a36_2")
         clear_branch("a36_1_na", "a36_2_na")
+        resiliencia_enlace_container.empty()
 
         set_ans("a36_1", None)
         set_ans("a36_2", None)
@@ -2544,26 +2781,29 @@ def pagina_A4():
         options=[1, 2],
         labels_map={1: "Sí", 2: "No"},
     )
+    dinamismo_conteos_container = st.empty()
     if a41_1 == 1:
-        number_answer(
-            "a41_before",
-            "Personas promedio haciendo actividades diferentes ANTES de la intervención",
-            0,
-            1_000_000,
-            1,
-        )
-        number_answer(
-            "a41_after",
-            "Personas promedio haciendo actividades diferentes DESPUÉS de la intervención",
-            0,
-            1_000_000,
-            1,
-        )
+        with dinamismo_conteos_container.container():
+            number_answer(
+                "a41_before",
+                "Personas promedio haciendo actividades diferentes ANTES de la intervención",
+                0,
+                1_000_000,
+                1,
+            )
+            number_answer(
+                "a41_after",
+                "Personas promedio haciendo actividades diferentes DESPUÉS de la intervención",
+                0,
+                1_000_000,
+                1,
+            )
     else:
         # No conteos → limpiar inputs y usar None (mejor que 0 para no sesgar el cálculo)
         clear_branch("a41_before", "a41_after")
         set_ans("a41_before", None)
         set_ans("a41_after", None)
+        dinamismo_conteos_container.empty()
     radio_answer(
         "a41_2",
         "¿Crees que la intervención ha generado un lugar más dinámico y especial para las personas que lo usan?",
@@ -2613,25 +2853,42 @@ def pagina_A4():
 
     st.markdown("**Actividad económica alrededor del lugar**")
     A0_3 = get_ans("A0_3", 2)
+    actividad_economica_fields = st.empty()
+    actividad_economica_notice = st.empty()
     if A0_3 == 1:
-        radio_answer(
-            "a44_1",
-            "¿Ha aumentado el número de negocios o unidades económicas alrededor del lugar a raíz de la intervención?",
-            options=[1, 2, 3],
-            labels_map={1: "Sí, bastantes", 2: "Sí, por lo menos una", 3: "No, ninguna"},
-        )
-        radio_answer(
-            "a44_2",
-            "¿Has percibido un mayor ingreso en tu negocio a partir de la intervención en el lugar?",
-            options=[1, 2, 3],
-            labels_map={1: "Sí, muy directamente", 2: "Sí, pero no sé si es por la intervención", 3: "La verdad no"},
-        )
+        actividad_economica_notice.empty()
+        with actividad_economica_fields.container():
+            radio_answer(
+                "a44_1",
+                "¿Ha aumentado el número de negocios o unidades económicas alrededor del lugar a raíz de la intervención?",
+                options=[1, 2, 3],
+                labels_map={1: "Sí, bastantes", 2: "Sí, por lo menos una", 3: "No, ninguna"},
+            )
+            a44_1_na = checkbox_answer("a44_1_na", "No aplica")
+            if a44_1_na:
+                clear_branch("a44_1")
+                set_ans("a44_1", None)
+            radio_answer(
+                "a44_2",
+                "¿Has percibido un mayor ingreso en tu negocio a partir de la intervención en el lugar?",
+                options=[1, 2, 3],
+                labels_map={1: "Sí, muy directamente", 2: "Sí, pero no sé si es por la intervención", 3: "La verdad no"},
+            )
+            a44_2_na = checkbox_answer("a44_2_na", "No aplica")
+            if a44_2_na:
+                clear_branch("a44_2")
+                set_ans("a44_2", None)
     else:
-        st.markdown("En esta evaluación no se recabó información directa de negocios o unidades económicas locales.")
+        actividad_economica_fields.empty()
+        with actividad_economica_notice.container():
+            st.markdown("En esta evaluación no se recabó información directa de negocios o unidades económicas locales.")
 
         clear_branch("a44_1", "a44_2")
+        clear_branch("a44_1_na", "a44_2_na")
         set_ans("a44_1", None)
         set_ans("a44_2", None)
+        set_ans("a44_1_na", False)
+        set_ans("a44_2_na", False)
 
     st.markdown("**Diversidad de actividades (regla 10+)**")
     slider_answer(
@@ -2664,11 +2921,132 @@ def pagina_resultados():
     program_id = ans.get("program_id", "OTRO") or "OTRO"
     A0_3 = ans.get("A0_3", 2) or 2
 
+    st.markdown("### Cargar resultados desde CSV")
+    required_indicator_cols = [
+        "A1.1", "A1.2", "A1.3", "A1.4", "A1.5",
+        "A2.1", "A2.2", "A2.3", "A2.4", "A2.5", "A2.6",
+        "A3.1", "A3.2", "A3.3", "A3.4", "A3.5", "A3.6", "A3.7",
+        "A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6",
+    ]
+
+    uploaded_results_csv = st.file_uploader(
+        "Sube un CSV generado por esta herramienta para reconstruir las gráficas",
+        type=["csv"],
+        key="uploaded_results_csv",
+    )
+
+    pasted_results_text = st.text_area(
+        "O pega aquí el CSV (encabezados + filas) o una sola fila en el mismo orden del CSV descargado",
+        key="pasted_results_text",
+        height=120,
+    )
+
+    uploaded_row = None
+    uploaded_parse_error = None
+    paste_parse_error = None
+
+    pasted_row = None
+    pasted_text = (pasted_results_text or "").strip()
+    if pasted_text:
+        try:
+            if "\n" in pasted_text:
+                pasted_df = pd.read_csv(StringIO(pasted_text))
+                missing_cols = [c for c in required_indicator_cols if c not in pasted_df.columns]
+                if pasted_df.empty:
+                    paste_parse_error = "El texto pegado no contiene filas de datos."
+                elif missing_cols:
+                    paste_parse_error = (
+                        "El texto pegado no contiene todas las columnas requeridas. "
+                        f"Faltan: {', '.join(missing_cols)}"
+                    )
+                else:
+                    if len(pasted_df) > 1:
+                        pasted_row_idx = st.selectbox(
+                            "Selecciona la fila pegada a visualizar",
+                            options=list(range(len(pasted_df))),
+                            format_func=lambda i: f"Fila pegada {i + 1}",
+                            key="pasted_results_row_idx",
+                        )
+                    else:
+                        pasted_row_idx = 0
+                    pasted_row = pasted_df.iloc[int(pasted_row_idx)]
+            else:
+                delimiter_candidates = [",", ";", "\t", "|"]
+                chosen_delimiter = max(delimiter_candidates, key=lambda d: pasted_text.count(d))
+                raw_values = next(csv.reader([pasted_text], delimiter=chosen_delimiter))
+                values = [v.strip() for v in raw_values]
+                if len(values) != len(SHEET_COLUMNS):
+                    paste_parse_error = (
+                        "La fila pegada no coincide con el número esperado de columnas "
+                        f"({len(values)} vs {len(SHEET_COLUMNS)})."
+                    )
+                else:
+                    pasted_row = pd.Series({col: values[i] for i, col in enumerate(SHEET_COLUMNS)})
+        except Exception as exc:
+            paste_parse_error = f"No se pudo interpretar el texto pegado: {exc}"
+
+    if uploaded_results_csv is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_results_csv)
+            missing_cols = [c for c in required_indicator_cols if c not in uploaded_df.columns]
+            if uploaded_df.empty:
+                uploaded_parse_error = "El CSV está vacío."
+            elif missing_cols:
+                uploaded_parse_error = (
+                    "El CSV no contiene todas las columnas requeridas. "
+                    f"Faltan: {', '.join(missing_cols)}"
+                )
+            else:
+                if len(uploaded_df) > 1:
+                    selected_row_idx = st.selectbox(
+                        "Selecciona la fila a visualizar",
+                        options=list(range(len(uploaded_df))),
+                        format_func=lambda i: f"Fila {i + 1}",
+                        key="uploaded_results_csv_row_idx",
+                    )
+                else:
+                    selected_row_idx = 0
+                uploaded_row = uploaded_df.iloc[int(selected_row_idx)]
+        except Exception as exc:
+            uploaded_parse_error = f"No se pudo leer el CSV: {exc}"
+
+    if pasted_row is not None:
+        uploaded_row = pasted_row
+        st.info("Usando datos pegados para reconstruir resultados.")
+
+    if paste_parse_error:
+        st.warning(paste_parse_error)
+
+    if uploaded_parse_error:
+        st.warning(uploaded_parse_error)
+
+    def _min_visible_score(value, minimum=20.0, include_none=False):
+        """Asegura que los scores tengan un valor mínimo visible."""
+        if value is None:
+            return minimum if include_none else None
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return value
+        return max(minimum, num)
+
+    def _apply_min_visible_scores(scores_dict, minimum=20.0, include_none=False):
+        return {
+            key: _min_visible_score(val, minimum, include_none=include_none)
+            for key, val in scores_dict.items()
+        }
+
     # ========== A1 ==========
     a11_1_val = ans.get("a11_1")
     a11_1 = None if ans.get("a11_1_na") else (float(a11_1_val) if a11_1_val is not None else None)
     a11_2_val = ans.get("a11_2")
-    a11_2 = None if ans.get("a11_2_na") else (float(a11_2_val) if a11_2_val is not None else None)
+    if ans.get("a11_2_na"):
+        a11_2 = None
+    elif a11_2_val is None:
+        a11_2 = None
+    else:
+        a11_2_num = float(a11_2_val)
+        a11_2 = a11_2_num * 10 if a11_2_num <= 10 else a11_2_num
 
     a12_1 = ans.get("a12_1")
     a12_2_1 = ans.get("a12_2_1")
@@ -2685,13 +3063,14 @@ def pagina_resultados():
     A1_4 = calc_A1_4(A1_3, a14_1)
     A1_5 = calc_A1_5(a12_3, a15_1, a15_2)
 
-    A1_indicators = {
+    A1_indicators_raw = {
         "A1.1": A1_1,
         "A1.2": A1_2,
         "A1.3": A1_3,
         "A1.4": A1_4,
         "A1.5": A1_5,
     }
+    A1_indicators = impute_missing_with_penalty(A1_indicators_raw, penalty=40.0)
 
     # ========== A3 ==========
     a31_raw = ans.get("a31_1")
@@ -2718,7 +3097,7 @@ def pagina_resultados():
     A3_6 = calc_A3_6(a36_1, a36_2)
     A3_7 = calc_A3_7(a37_1)
 
-    A3_indicators = {
+    A3_indicators_raw = {
         "A3.1": A3_1,
         "A3.2": A3_2,
         "A3.3": A3_3,
@@ -2727,6 +3106,7 @@ def pagina_resultados():
         "A3.6": A3_6,
         "A3.7": A3_7,
     }
+    A3_indicators = impute_missing_with_penalty(A3_indicators_raw, penalty=40.0)
 
     # ========== A2 ==========
     a21_use_percent = ans.get("a21_use_percent")
@@ -2741,8 +3121,8 @@ def pagina_resultados():
         a21_2 = ans.get("a21_2")
 
     a22_1 = ans.get("a22_1")
-    a22_2 = ans.get("a22_2")
-    a22_3 = ans.get("a22_3")
+    a22_2 = None if ans.get("a22_2_na") else ans.get("a22_2")
+    a22_3 = None if ans.get("a22_3_na") else ans.get("a22_3")
     a23_1 = ans.get("a23_1")
 
     a24_1_val = ans.get("a24_1")
@@ -2766,7 +3146,7 @@ def pagina_resultados():
     A2_5 = calc_A2_5(a25_1, a25_2, a25_3)
     A2_6 = calc_A2_6(a26_1_p, a26_2, a26_2_1)
 
-    A2_indicators = {
+    A2_indicators_raw = {
         "A2.1": A2_1,
         "A2.2": A2_2,
         "A2.3": A2_3,
@@ -2774,6 +3154,7 @@ def pagina_resultados():
         "A2.5": A2_5,
         "A2.6": A2_6,
     }
+    A2_indicators = impute_missing_with_penalty(A2_indicators_raw, penalty=40.0)
 
     # ========== A4 ==========
     a41_1 = ans.get("a41_1")
@@ -2783,8 +3164,8 @@ def pagina_resultados():
     a42_1 = ans.get("a42_1")
     a43_1 = ans.get("a43_1")
     a43_2 = ans.get("a43_2")
-    a44_1 = ans.get("a44_1")
-    a44_2 = ans.get("a44_2")
+    a44_1 = None if ans.get("a44_1_na") else ans.get("a44_1")
+    a44_2 = None if ans.get("a44_2_na") else ans.get("a44_2")
     a45_1 = ans.get("a45_1", 0)
     a46_1 = ans.get("a46_1")
 
@@ -2797,7 +3178,7 @@ def pagina_resultados():
     A4_6 = calc_A4_6(S461, S462, A1_1)
     A4_4 = calc_A4_4(A0_3, a44_1, a44_2, A4_1, A4_2, A4_3, A4_5, A4_6)
 
-    A4_indicators = {
+    A4_indicators_raw = {
         "A4.1": A4_1,
         "A4.2": A4_2,
         "A4.3": A4_3,
@@ -2805,12 +3186,37 @@ def pagina_resultados():
         "A4.5": A4_5,
         "A4.6": A4_6,
     }
+    A4_indicators = impute_missing_with_penalty(A4_indicators_raw, penalty=40.0)
 
     # ===== Intangibles =====
-    intangibles_A1 = calc_intangibles_A1(A1_1, A1_2, A1_3, A1_4, A1_5)
-    intangibles_A2 = calc_intangibles_A2(A2_1, A2_2, A2_3, A2_4, A2_5, A2_6, A3_4)
-    intangibles_A3 = calc_intangibles_A3(A3_1, A3_2, A3_3, A3_4, A3_5, A3_6, A3_7)
-    intangibles_A4 = calc_intangibles_A4(A4_1, A4_2, A4_3, A4_4, A4_5, A4_6)
+    intangibles_A1_raw = calc_intangibles_A1(A1_1, A1_2, A1_3, A1_4, A1_5)
+    intangibles_A2_raw = calc_intangibles_A2(A2_1, A2_2, A2_3, A2_4, A2_5, A2_6, A3_4)
+    intangibles_A3_raw = calc_intangibles_A3(A3_1, A3_2, A3_3, A3_4, A3_5, A3_6, A3_7)
+    intangibles_A4_raw = calc_intangibles_A4(
+        A4_1,
+        A4_2,
+        A4_3,
+        A4_4,
+        A4_5,
+        A4_6,
+        A1_2,
+        A1_3,
+        A3_6,
+        intangibles_A3_raw.get("Agradable"),
+    )
+
+    def zeros_to_none(d):
+        return {k: (None if v == 0 else v) for k, v in d.items()}
+
+    intangibles_A1_with_none = zeros_to_none(intangibles_A1_raw)
+    intangibles_A2_with_none = zeros_to_none(intangibles_A2_raw)
+    intangibles_A3_with_none = zeros_to_none(intangibles_A3_raw)
+    intangibles_A4_with_none = zeros_to_none(intangibles_A4_raw)
+
+    intangibles_A1 = impute_missing_with_penalty(intangibles_A1_with_none, penalty=40.0)
+    intangibles_A2 = impute_missing_with_penalty(intangibles_A2_with_none, penalty=40.0)
+    intangibles_A3 = impute_missing_with_penalty(intangibles_A3_with_none, penalty=40.0)
+    intangibles_A4 = impute_missing_with_penalty(intangibles_A4_with_none, penalty=40.0)
 
     # ===== Totales y global =====
     A1_total = compute_attribute_total(program_id, "A1", A1_indicators)
@@ -2819,7 +3225,151 @@ def pagina_resultados():
     A4_total = compute_attribute_total(program_id, "A4", A4_indicators)
 
     section_scores = compute_section_scores(A1_total, A2_total, A3_total, A4_total)
-    global_score = compute_global_score(program_id, section_scores)
+    global_score = compute_global_score(
+        program_id,
+        section_scores,
+        sostenible_score=intangibles_A4.get("Sostenible"),
+        sostenible_weight=0.15,
+        conmemorativo_score=intangibles_A4.get("Conmemorativo"),
+        conmemorativo_weight=0.10,
+    )
+
+    if uploaded_row is not None:
+        try:
+            def _row_float_or_none(col_name):
+                if col_name not in uploaded_row.index:
+                    return None
+                val = uploaded_row[col_name]
+                if pd.isna(val):
+                    return None
+                parsed = to_float_or_none(val)
+                if parsed is None:
+                    return None
+                if isinstance(parsed, float) and not np.isfinite(parsed):
+                    return None
+                return parsed
+
+            uploaded_program_id = str(uploaded_row.get("programa", program_id) or program_id)
+
+            A1_indicators = {
+                "A1.1": _row_float_or_none("A1.1"),
+                "A1.2": _row_float_or_none("A1.2"),
+                "A1.3": _row_float_or_none("A1.3"),
+                "A1.4": _row_float_or_none("A1.4"),
+                "A1.5": _row_float_or_none("A1.5"),
+            }
+            A2_indicators = {
+                "A2.1": _row_float_or_none("A2.1"),
+                "A2.2": _row_float_or_none("A2.2"),
+                "A2.3": _row_float_or_none("A2.3"),
+                "A2.4": _row_float_or_none("A2.4"),
+                "A2.5": _row_float_or_none("A2.5"),
+                "A2.6": _row_float_or_none("A2.6"),
+            }
+            A3_indicators = {
+                "A3.1": _row_float_or_none("A3.1"),
+                "A3.2": _row_float_or_none("A3.2"),
+                "A3.3": _row_float_or_none("A3.3"),
+                "A3.4": _row_float_or_none("A3.4"),
+                "A3.5": _row_float_or_none("A3.5"),
+                "A3.6": _row_float_or_none("A3.6"),
+                "A3.7": _row_float_or_none("A3.7"),
+            }
+            A4_indicators = {
+                "A4.1": _row_float_or_none("A4.1"),
+                "A4.2": _row_float_or_none("A4.2"),
+                "A4.3": _row_float_or_none("A4.3"),
+                "A4.4": _row_float_or_none("A4.4"),
+                "A4.5": _row_float_or_none("A4.5"),
+                "A4.6": _row_float_or_none("A4.6"),
+            }
+
+            A1_1_u, A1_2_u, A1_3_u, A1_4_u, A1_5_u = (
+                A1_indicators["A1.1"],
+                A1_indicators["A1.2"],
+                A1_indicators["A1.3"],
+                A1_indicators["A1.4"],
+                A1_indicators["A1.5"],
+            )
+            A2_1_u, A2_2_u, A2_3_u, A2_4_u, A2_5_u, A2_6_u = (
+                A2_indicators["A2.1"],
+                A2_indicators["A2.2"],
+                A2_indicators["A2.3"],
+                A2_indicators["A2.4"],
+                A2_indicators["A2.5"],
+                A2_indicators["A2.6"],
+            )
+            A3_1_u, A3_2_u, A3_3_u, A3_4_u, A3_5_u, A3_6_u, A3_7_u = (
+                A3_indicators["A3.1"],
+                A3_indicators["A3.2"],
+                A3_indicators["A3.3"],
+                A3_indicators["A3.4"],
+                A3_indicators["A3.5"],
+                A3_indicators["A3.6"],
+                A3_indicators["A3.7"],
+            )
+            A4_1_u, A4_2_u, A4_3_u, A4_4_u, A4_5_u, A4_6_u = (
+                A4_indicators["A4.1"],
+                A4_indicators["A4.2"],
+                A4_indicators["A4.3"],
+                A4_indicators["A4.4"],
+                A4_indicators["A4.5"],
+                A4_indicators["A4.6"],
+            )
+
+            intangibles_A1_raw = calc_intangibles_A1(A1_1_u, A1_2_u, A1_3_u, A1_4_u, A1_5_u)
+            intangibles_A2_raw = calc_intangibles_A2(A2_1_u, A2_2_u, A2_3_u, A2_4_u, A2_5_u, A2_6_u, A3_4_u)
+            intangibles_A3_raw = calc_intangibles_A3(A3_1_u, A3_2_u, A3_3_u, A3_4_u, A3_5_u, A3_6_u, A3_7_u)
+            intangibles_A4_raw = calc_intangibles_A4(
+                A4_1_u,
+                A4_2_u,
+                A4_3_u,
+                A4_4_u,
+                A4_5_u,
+                A4_6_u,
+                A1_2_u,
+                A1_3_u,
+                A3_6_u,
+                intangibles_A3_raw.get("Agradable"),
+            )
+
+            intangibles_A1 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A1_raw.items()}, penalty=40.0)
+            intangibles_A2 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A2_raw.items()}, penalty=40.0)
+            intangibles_A3 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A3_raw.items()}, penalty=40.0)
+            intangibles_A4 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A4_raw.items()}, penalty=40.0)
+
+            A1_total = _row_float_or_none("A1_total")
+            A2_total = _row_float_or_none("A2_total")
+            A3_total = _row_float_or_none("A3_total")
+            A4_total = _row_float_or_none("A4_total")
+            if A1_total is None:
+                A1_total = compute_attribute_total(uploaded_program_id, "A1", A1_indicators)
+            if A2_total is None:
+                A2_total = compute_attribute_total(uploaded_program_id, "A2", A2_indicators)
+            if A3_total is None:
+                A3_total = compute_attribute_total(uploaded_program_id, "A3", A3_indicators)
+            if A4_total is None:
+                A4_total = compute_attribute_total(uploaded_program_id, "A4", A4_indicators)
+
+            global_score = _row_float_or_none("global_score")
+            if global_score is None:
+                section_scores = compute_section_scores(A1_total, A2_total, A3_total, A4_total)
+                global_score = compute_global_score(
+                    uploaded_program_id,
+                    section_scores,
+                    sostenible_score=intangibles_A4.get("Sostenible"),
+                    sostenible_weight=0.15,
+                    conmemorativo_score=intangibles_A4.get("Conmemorativo"),
+                    conmemorativo_weight=0.10,
+                )
+
+            program_id = uploaded_program_id
+            nombre_lugar = str(uploaded_row.get("nombre_lugar", ans.get("nombre_lugar", "")) or "").strip()
+            nombre_eval = str(uploaded_row.get("nombre_evaluador", ans.get("nombre_evaluador", "")) or "").strip()
+            st.info("Mostrando gráficas y resultados desde el CSV cargado.")
+        except Exception as exc:
+            st.warning(f"No se pudo reconstruir resultados desde el CSV cargado. Se usan los datos actuales del formulario. Detalle: {exc}")
+            uploaded_row = None
 
     # ===== Resumen numérico =====
     st.subheader("Resumen de atributos")
@@ -2830,8 +3380,9 @@ def pagina_resultados():
     c4.metric("Usos y Actividades", f"{A4_total:.1f}")
     c5.metric("Resultado global", f"{global_score:.1f}")
 
-    nombre_lugar = ans.get("nombre_lugar", "").strip()
-    nombre_eval = ans.get("nombre_evaluador", "").strip()
+    if uploaded_row is None:
+        nombre_lugar = ans.get("nombre_lugar", "").strip()
+        nombre_eval = ans.get("nombre_evaluador", "").strip()
     st.markdown(
         f"**Lugar:** {nombre_lugar or 'Sin nombre'} — "
         f"**Evaluado por:** {nombre_eval or 'Sin especificar'}"
@@ -2898,138 +3449,725 @@ def pagina_resultados():
                 "Local",
                 "Sostenible",
                 "Conmemorativo",
-                "Comunitario",
+                "Pertenencia",
             ],
             "outer_labels": ["A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6"],
         },
     }
 
     scores_middle = {
-        "Usos y Actividades": intangibles_A4,
-        "Comodidad e Imagen": intangibles_A3,
-        "Conexiones y Accesos": intangibles_A2,
-        "Encuentro": intangibles_A1,
+        "Usos y Actividades": _apply_min_visible_scores(intangibles_A4, include_none=True),
+        "Comodidad e Imagen": _apply_min_visible_scores(intangibles_A3, include_none=True),
+        "Conexiones y Accesos": _apply_min_visible_scores(intangibles_A2, include_none=True),
+        "Encuentro": _apply_min_visible_scores(intangibles_A1, include_none=True),
     }
     scores_outer = {
-        "Usos y Actividades": A4_indicators,
-        "Comodidad e Imagen": A3_indicators,
-        "Conexiones y Accesos": A2_indicators,
-        "Encuentro": A1_indicators,
+        "Usos y Actividades": _apply_min_visible_scores(A4_indicators, include_none=True),
+        "Comodidad e Imagen": _apply_min_visible_scores(A3_indicators, include_none=True),
+        "Conexiones y Accesos": _apply_min_visible_scores(A2_indicators, include_none=True),
+        "Encuentro": _apply_min_visible_scores(A1_indicators, include_none=True),
     }
 
+    if not MATPLOTLIB_AVAILABLE:
+        st.error("No se pudo cargar matplotlib para generar las gráficas de resultados.")
+        st.info(f"Instala el paquete en el mismo entorno que ejecuta Streamlit: `{sys.executable} -m pip install matplotlib`")
+        if MATPLOTLIB_ERROR:
+            st.caption(f"Detalle técnico: {MATPLOTLIB_ERROR}")
+        return
+
+    if not PYCIRCLIZE_AVAILABLE:
+        st.error("No se pudo cargar pycirclize para generar las gráficas de resultados.")
+        st.info(f"Instala el paquete en el mismo entorno que ejecuta Streamlit: `{sys.executable} -m pip install pycirclize`")
+        if PYCIRCLIZE_ERROR:
+            st.caption(f"Detalle técnico: {PYCIRCLIZE_ERROR}")
+        return
+
     # ──────────────────────────────────────────
-    # Rueda global  (drop-in replacement)
+    # Rueda global (UI sin textos del gráfico)
     # ──────────────────────────────────────────
+    from datetime import datetime
+
+    # Toggle de metadata
+    st.markdown("**Metadata**")
+    show_metadata = st.checkbox(
+        "Mostrar metadata",
+        value=True,
+        key="show_metadata_wheel",
+    )
+
     st.markdown("---")
-    st.markdown("<h3 style='text-align: center;'>Diagrama de Lugar</h3>", unsafe_allow_html=True)
 
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.textpath import TextPath
-    from matplotlib.patches import PathPatch
-    from matplotlib.font_manager import FontProperties
-    from matplotlib.transforms import Affine2D
-    from pycirclize import Circos
+    # Fuente local (opcional)
+    for font_file in [
+        BASE_DIR / "Poppins" / "Poppins-Regular.ttf",
+        BASE_DIR / "Poppins" / "Poppins-SemiBold.ttf",
+    ]:
+        if font_file.exists():
+            font_manager.fontManager.addfont(str(font_file))
+    plt.rcParams["font.family"] = "Poppins"
 
-    # Use Roboto everywhere (make sure the font is available in your system)
-    plt.rcParams["font.family"] = "Roboto"
-
-    # ----- 1.  COLORS --------------------------------------------------------------
+    # Colores (look)
     track_colors = {
-        "Usos y Actividades": {"inner": "#D15E4C", "middle": "#E09F92", "outer": "#F4D8CE"},
-        "Comodidad e Imagen": {"inner": "#A8BA4F", "middle": "#CDD492", "outer": "#EEF2CB"},
-        "Conexiones y Accesos": {"inner": "#25447E", "middle": "#6F8EB4", "outer": "#B2C3D3"},
-        "Encuentro":           {"inner": "#575693", "middle": "#9D9EBA", "outer": "#D0D3D9"},
+        "Usos y Actividades": {"inner": "#E45B48", "middle": "#E79A90", "outer": "#EBCBC2"},
+        "Comodidad e Imagen": {"inner": "#A5BB39", "middle": "#BFCA73", "outer": "#DBE0B2"},
+        "Conexiones y Accesos": {"inner": "#275A9F", "middle": "#7297C2", "outer": "#B4C9DE"},
+        "Encuentro": {"inner": "#575A99", "middle": "#9EA2C6", "outer": "#BEC1CC"},
     }
 
-    # ----- 2.  RADIO ---------------------------------------------------------------
-    r_center_min, r_center_max = 0,   5          # disco central
-    r_inner_min,  r_inner_max  = 10, 45          # anillo del atributo (sector title vive aquí)
-    r_mid_min,    r_mid_max    = 50, 85          # anillo intangibles
-    r_outer_min,  r_outer_max  = 80, 115         # anillo indicadores
+    # Radios
+    r_center_max = 13
+    r_inner_min, r_inner_max = 15, 40
+    r_mid_min, r_mid_max = 42, 73
+    r_outer_min, r_outer_max = 75, 108
 
-    # ----- 3.  SECTORES Y PUNTAJES -------------------------------------------------
-    sectors = {name: 90 for name in sector_names}           # 4 × 90 °
-    circos = Circos(sectors, space=0)                       # sin huecos
+    # Sectores (quita la inclinación por espacios entre cuadrantes)
+    sectors = {name: 90 for name in sector_names}
+    circos = Circos(sectors, start=0, end=360, space=0)
 
-    #  «sector_scores» ya existe en tu código; si no, constrúyelo igual que antes
-    # (Este bloque es idéntico al tuyo; lo incluyo por claridad)
+    # Scores (igual funcionalidad)
     sector_scores = {}
     for name in sector_names:
-        mid_labels  = SECTOR_CONFIG[name]["middle_labels"]
-        out_labels  = SECTOR_CONFIG[name]["outer_labels"]
-        middle_pcts = [scores_middle.get(name,  {}).get(lbl, 0.0) for lbl in mid_labels]
-        outer_pcts  = [scores_outer .get(name,  {}).get(lbl, 0.0) for lbl in out_labels]
+        mid_labels = SECTOR_CONFIG[name]["middle_labels"]
+        out_labels = SECTOR_CONFIG[name]["outer_labels"]
+        middle_pcts = [scores_middle.get(name, {}).get(lbl, 0.0) for lbl in mid_labels]
+        outer_pcts = [scores_outer.get(name, {}).get(lbl, 0.0) for lbl in out_labels]
         sector_scores[name] = {
-            "middle_pcts":  middle_pcts,
-            "outer_pcts":   outer_pcts,
-            "middle_labels": mid_labels,
-            "outer_labels":  out_labels,
+            "middle_pcts": middle_pcts,
+            "outer_pcts": outer_pcts,
         }
 
-    # ----- 5.  FIGURA BASE ---------------------------------------------------------
-    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
-    ax  = fig.axes[0]
-
-    # ----- 4.  DIBUJO DE LOS ANILLOS ----------------------------------------------
+    # Dibujo de anillos (mantiene lógica de resultados)
     for sector in circos.sectors:
-        name   = sector.name
+        name = sector.name
         colors = track_colors[name]
         length = sector.size
 
         middle_pcts = sector_scores[name]["middle_pcts"]
-        outer_pcts  = sector_scores[name]["outer_pcts"]
+        outer_pcts = sector_scores[name]["outer_pcts"]
 
-        # ANILLO INNER (fondo del atributo)
+        # INNER
         t_inner = sector.add_track((r_inner_min, r_inner_max))
         t_inner.rect(0, length, fc=colors["inner"], ec="white", lw=4)
 
-        # ANILLO MIDDLE (intangibles)
+        # MIDDLE
         if middle_pcts:
             blk = length / len(middle_pcts)
             for i, pct in enumerate(middle_pcts):
                 start, end = i * blk, (i + 1) * blk
-                ratio = nz(pct) / 100.0
-                # Color lleno
+                ratio = max(0.0, min(1.0, nz(pct) / 100.0))
                 if ratio > 0:
-                    t = sector.add_track((r_mid_min,
-                                        r_mid_min + (r_mid_max - r_mid_min) * ratio))
+                    t = sector.add_track((r_mid_min, r_mid_min + (r_mid_max - r_mid_min) * ratio))
                     t.rect(start, end, fc=colors["middle"], ec="white", lw=4)
-                # Color vacío
-                if ratio < 1:
-                    t = sector.add_track((r_mid_min + (r_mid_max - r_mid_min) * ratio,
-                                        r_mid_max))
-                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=4)
 
-        # ANILLO OUTER (indicadores)
+        # OUTER
         if outer_pcts:
             blk = length / len(outer_pcts)
             for i, pct in enumerate(outer_pcts):
                 start, end = i * blk, (i + 1) * blk
-                ratio = nz(pct) / 100.0
-                # Lleno
+                ratio = max(0.0, min(1.0, nz(pct) / 100.0))
                 if ratio > 0:
-                    t = sector.add_track((r_outer_min,
-                                        r_outer_min + (r_outer_max - r_outer_min) * ratio))
-                    t.rect(start, end, fc=colors["outer"], ec="white", lw=6)
-                # Vacío
-                if ratio < 1:
-                    t = sector.add_track((r_outer_min + (r_outer_max - r_outer_min) * ratio,
-                                        r_outer_max))
-                    t.rect(start, end, fc="#FFFFFF", ec="white", lw=6)
+                    t = sector.add_track((r_outer_min, r_outer_min + (r_outer_max - r_outer_min) * ratio))
+                    t.rect(start, end, fc=colors["outer"], ec="white", lw=4)
+    # Figura final
+    fig_size = (9.6, 10.2) if show_metadata else (9.6, 9.6)
+    fig = circos.plotfig(figsize=fig_size, dpi=110)
+    ax = fig.axes[0]
 
-    # ----- 5.  FIGURA BASE ---------------------------------------------------------
-    fig = circos.plotfig(figsize=(4.5, 4.5), dpi=90)
-    ax  = fig.axes[0]
+    ax.set_aspect("equal", adjustable="box")
+    ax.axis("off")
+    fig.patch.set_facecolor("#FFFFFF")
+    ax.patch.set_facecolor("#FFFFFF")
 
+    # Metadata (mantén la tuya, solo ajusta posiciones)
+    if show_metadata:
+        # Título (solo cuando metadata está activa)
+        place_meta = " · ".join(
+            x for x in [nombre_lugar, ans.get("a0_municipio"), ans.get("a0_estado")] if x
+        )
+        fig.text(
+            0.5, 1.05, place_meta or "Lugar",
+            ha="center", va="center",
+            fontsize=24, color="#232544", fontweight="bold"
+        )
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        fig.text(0.14, 0.035, timestamp, ha="center", va="center", fontsize=10, color="#777777", style="italic")
+        fig.text(0.86, 0.035, nombre_eval or "Evaluador", ha="center", va="center", fontsize=10, color="#777777")
+        fig.subplots_adjust(top=0.835, bottom=0.07, left=0.02, right=0.98)
+    else:
+        fig.subplots_adjust(top=0.835, bottom=0.04, left=0.02, right=0.98)
 
-    # ----- 8.  DISCO CENTRAL Y TEXTO “LUGAR” ---------------------------------------
-
-
-
-
-    # ----- 7.  MOSTRAR EN STREAMLIT ------------------------------------------------
     st.pyplot(fig, use_container_width=True)
+
+    # ===== Gráfica de fortalezas y oportunidades =====
+    attribute_scores = {
+        "Encuentro": A1_total,
+        "Conexiones y Accesos": A2_total,
+        "Comodidad e Imagen": A3_total,
+        "Usos y Actividades": A4_total,
+    }
+
+    ordered_attributes = sorted(attribute_scores.keys(), key=lambda name: attribute_scores[name], reverse=True)
+    bar_labels = ordered_attributes
+    bar_values = [attribute_scores[name] for name in ordered_attributes]
+    bar_colors = [track_colors[name]["inner"] for name in ordered_attributes]
+
+    fig_attr, ax_attr = plt.subplots(figsize=(8.6, 4.0), dpi=110)
+    x_pos = np.arange(len(bar_labels))
+    bars = ax_attr.bar(x_pos, bar_values, color=bar_colors, width=0.62)
+
+    ax_attr.set_ylim(0, 112)
+    ax_attr.set_xticks(x_pos)
+    ax_attr.set_xticklabels(bar_labels, fontsize=10, fontname="Poppins", color="#232544", rotation=0, ha="center")
+    ax_attr.set_title(
+        "Comparación",
+        fontsize=15,
+        fontname="Poppins",
+        color="#232544",
+        fontweight="bold",
+        pad=42,
+    )
+    chart_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    place_meta_chart = " · ".join(
+        x for x in [nombre_lugar, ans.get("a0_municipio"), ans.get("a0_estado")] if x
+    )
+    meta_text = f"Lugar: {place_meta_chart or 'Sin nombre'}   |   Evaluador: {nombre_eval or 'Sin especificar'}   |   {chart_timestamp}"
+    ax_attr.text(
+        0.5,
+        1.08,
+        meta_text,
+        transform=ax_attr.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        fontname="Poppins",
+        color="#777777",
+    )
+
+    ax_attr.grid(False)
+    ax_attr.set_yticks([])
+
+    for spine in ["top", "right", "left", "bottom"]:
+        ax_attr.spines[spine].set_visible(False)
+
+    for bar, value in zip(bars, bar_values):
+        ax_attr.text(
+            bar.get_x() + bar.get_width() / 2,
+            min(value + 2.0, 108.0),
+            f"{value:.1f}",
+            va="bottom",
+            ha="center",
+            fontsize=10,
+            fontname="Poppins",
+            color="#232544",
+            fontweight="bold",
+        )
+
+    fig_attr.patch.set_facecolor("#FFFFFF")
+    ax_attr.patch.set_facecolor("#FFFFFF")
+    fig_attr.subplots_adjust(top=0.76, bottom=0.2)
+    st.pyplot(fig_attr, use_container_width=True)
+
+    # ===== Gráfica de puntos y tabla: intangibles (mejores/peores/atención) =====
+    all_intangibles = []
+    for atributo, intangibles_dict in [
+        ("Encuentro", intangibles_A1),
+        ("Conexiones y Accesos", intangibles_A2),
+        ("Comodidad e Imagen", intangibles_A3),
+        ("Usos y Actividades", intangibles_A4),
+    ]:
+        for intangible_name, intangible_value in intangibles_dict.items():
+            if intangible_value is None:
+                continue
+            all_intangibles.append(
+                {
+                    "Atributo": atributo,
+                    "Intangible": intangible_name,
+                    "Valor": float(intangible_value),
+                }
+            )
+
+    if all_intangibles:
+        df_all_intangibles = pd.DataFrame(all_intangibles).sort_values("Valor", ascending=False).reset_index(drop=True)
+
+        top_n = min(5, len(df_all_intangibles))
+        bottom_n = min(5, len(df_all_intangibles))
+        top_indices = set(df_all_intangibles.head(top_n).index.tolist())
+        bottom_indices = set(df_all_intangibles.tail(bottom_n).index.tolist())
+
+        median_value = float(df_all_intangibles["Valor"].median())
+        candidate_median = df_all_intangibles.copy()
+        candidate_median["dist_median"] = (candidate_median["Valor"] - median_value).abs()
+        candidate_median = candidate_median[~candidate_median.index.isin(top_indices | bottom_indices)]
+        median_n = min(5, len(candidate_median))
+        median_indices = set(candidate_median.nsmallest(median_n, "dist_median").index.tolist())
+
+        selected_indices = list(top_indices | bottom_indices | median_indices)
+        df_selected = df_all_intangibles.loc[selected_indices].copy()
+
+        def classify_intangible(row_index: int) -> str:
+            if row_index in top_indices:
+                return "Mejores"
+            if row_index in bottom_indices:
+                return "Peores"
+            return "Mediana"
+
+        df_selected["Categoría"] = [classify_intangible(i) for i in df_selected.index.tolist()]
+
+        attribute_colors = {
+            "Encuentro": track_colors["Encuentro"]["inner"],
+            "Conexiones y Accesos": track_colors["Conexiones y Accesos"]["inner"],
+            "Comodidad e Imagen": track_colors["Comodidad e Imagen"]["inner"],
+            "Usos y Actividades": track_colors["Usos y Actividades"]["inner"],
+        }
+
+        semaforo_bg = {
+            "Peores": "#FDECEC",
+            "Media": "#FFF4E5",
+            "Mejores": "#EAF7EC",
+        }
+        semaforo_title = {
+            "Peores": "#C62828",
+            "Media": "#EF6C00",
+            "Mejores": "#2E7D32",
+        }
+
+        df_selected["Categoría"] = df_selected["Categoría"].replace({"Mediana": "Media"})
+        panel_order = ["Peores", "Media", "Mejores"]
+        panel_display_names = {
+            "Peores": "Debilidades",
+            "Media": "Promedio",
+            "Mejores": "Fortalezas",
+        }
+        panel_data = {
+            category: df_selected[df_selected["Categoría"] == category].sort_values("Valor", ascending=False).reset_index(drop=True)
+            for category in panel_order
+        }
+
+        max_rows = max((len(panel_data[c]) for c in panel_order), default=1)
+        fig_height = max(4.8, 2.8 + max_rows * 0.65)
+        fig_int, ax_int = plt.subplots(figsize=(13.0, fig_height), dpi=110)
+        ax_int.axis("off")
+
+        col_w = 0.305
+        col_gap = 0.0225
+        col_x = [0.0, col_w + col_gap, 2 * (col_w + col_gap)]
+
+        for x0, category in zip(col_x, panel_order):
+            ax_int.add_patch(
+                plt.Rectangle(
+                    (x0, 0.05),
+                    col_w,
+                    0.88,
+                    transform=ax_int.transAxes,
+                    facecolor=semaforo_bg[category],
+                    edgecolor="none",
+                )
+            )
+            ax_int.text(
+                x0 + (col_w / 2),
+                0.89,
+                panel_display_names[category],
+                transform=ax_int.transAxes,
+                ha="center",
+                va="center",
+                fontsize=18,
+                fontname="Poppins",
+                color=semaforo_title[category],
+                fontweight="bold",
+            )
+
+            df_cat = panel_data[category]
+            y_start = 0.80
+            row_gap = 0.13
+            for row_idx, (_, row) in enumerate(df_cat.iterrows()):
+                y_text = y_start - row_idx * row_gap
+                score_0_10 = float(row["Valor"]) / 10.0
+                ax_int.text(
+                    x0 + 0.02,
+                    y_text,
+                    f"• {score_0_10:.1f}  {row['Intangible']}",
+                    transform=ax_int.transAxes,
+                    ha="left",
+                    va="center",
+                    fontsize=13,
+                    fontname="Poppins",
+                    color=attribute_colors.get(row["Atributo"], "#232544"),
+                    fontweight="semibold",
+                )
+
+        ax_int.text(
+            0.5,
+            0.98,
+            "Cualidades Intangibles",
+            transform=ax_int.transAxes,
+            ha="center",
+            va="center",
+            fontsize=20,
+            fontname="Poppins",
+            color="#232544",
+            fontweight="bold",
+        )
+
+        # Leyenda por atributo (color del texto)
+        legend_handles = [
+            plt.Line2D([0], [0], marker="o", color="w", label=attr, markerfacecolor=col, markersize=8)
+            for attr, col in attribute_colors.items()
+        ]
+        fig_int.legend(
+            handles=legend_handles,
+            title="Color por atributo",
+            loc="lower center",
+            ncol=2,
+            frameon=False,
+            fontsize=8.5,
+            title_fontsize=9,
+            bbox_to_anchor=(0.5, 0.01),
+        )
+
+        fig_int.patch.set_facecolor("#FFFFFF")
+        fig_int.subplots_adjust(left=0.03, right=0.99, top=0.93, bottom=0.06)
+        st.pyplot(fig_int, use_container_width=True)
+
+        peores_nombres = ", ".join(panel_data["Peores"]["Intangible"].tolist())
+        media_nombres = ", ".join(panel_data["Media"]["Intangible"].tolist())
+        mejores_nombres = ", ".join(panel_data["Mejores"]["Intangible"].tolist())
+
+        st.markdown("#### Interpretación y recomendaciones")
+        st.write(
+            "Los resultados muestran tres grupos claros de intangibles. "
+            f"En **Fortalezas** destacan: {mejores_nombres}. "
+            f"En **Promedio** se ubican: {media_nombres}. "
+            f"En **Debilidades** aparecen: {peores_nombres}."
+        )
+        st.write(
+            "**Recomendaciones:** (1) proteger y replicar en otros atributos las prácticas que sostienen los intangibles de Mejores; "
+            "(2) para los de Media, definir acciones de corto plazo con metas de mejora por trimestre para moverlos al grupo alto; "
+            "(3) en Peores, priorizar intervenciones focalizadas y seguimiento frecuente, empezando por los factores de uso, acceso, "
+            "cuidado y organización comunitaria que estén limitando su desempeño."
+        )
+
+    attribute_colors = {
+        "Encuentro": track_colors["Encuentro"]["inner"],
+        "Conexiones y Accesos": track_colors["Conexiones y Accesos"]["inner"],
+        "Comodidad e Imagen": track_colors["Comodidad e Imagen"]["inner"],
+        "Usos y Actividades": track_colors["Usos y Actividades"]["inner"],
+    }
+    df_indicator_filtered = None
+    df_intang_filtered = None
+
+    st.markdown("---")
+    st.markdown("### Indicadores por atributo")
+    if not PLOTLY_AVAILABLE:
+        detail = f" Detalle técnico: {PLOTLY_ERROR}" if PLOTLY_ERROR else ""
+        st.warning(f"No se pudo cargar Plotly para visualizaciones interactivas.{detail}")
+    else:
+        indicator_labels_by_sector = {
+            "Encuentro": {
+                "A1.1": "Diversidad demográfica",
+                "A1.2": "Redes ciudadanas",
+                "A1.3": "Voluntariado",
+                "A1.4": "Cuidado del lugar",
+                "A1.5": "Uso nocturno",
+            },
+            "Conexiones y Accesos": {
+                "A2.1": "Modos de transporte",
+                "A2.2": "Conectividad con el lugar",
+                "A2.3": "Permanencia",
+                "A2.4": "Accesibilidad del entorno",
+                "A2.5": "Accesibilidad dentro del lugar (movilidad reducida)",
+                "A2.6": "Accesibilidad dentro del lugar (primera infancia y cuidadores)",
+            },
+            "Comodidad e Imagen": {
+                "A3.1": "Seguridad y limpieza",
+                "A3.2": "Cuidado de la imagen",
+                "A3.3": "Comodidad",
+                "A3.4": "Caminabilidad",
+                "A3.5": "Lugares para sentarse",
+                "A3.6": "Resiliencia climática y áreas verdes",
+                "A3.7": "Ser agradable",
+            },
+            "Usos y Actividades": {
+                "A4.1": "Dinamismo",
+                "A4.2": "Referente",
+                "A4.3": "Utilidad",
+                "A4.4": "Actividad económica",
+                "A4.5": "Diversidad de actividades",
+                "A4.6": "Localidad",
+            },
+        }
+
+        sector_to_indicators_data = {
+            "Encuentro": A1_indicators,
+            "Conexiones y Accesos": A2_indicators,
+            "Comodidad e Imagen": A3_indicators,
+            "Usos y Actividades": A4_indicators,
+        }
+
+        indicator_rows = []
+        global_order_idx = 1
+        for sector_name in ["Encuentro", "Conexiones y Accesos", "Comodidad e Imagen", "Usos y Actividades"]:
+            labels_map = indicator_labels_by_sector[sector_name]
+            indicators_map = sector_to_indicators_data[sector_name]
+            local_pos = 1
+            for code, label in labels_map.items():
+                value = indicators_map.get(code)
+                if value is None:
+                    local_pos += 1
+                    continue
+                indicator_rows.append(
+                    {
+                        "Atributo": sector_name,
+                        "Indicador": label,
+                        "Valor": float(value),
+                        "OrdenGlobal": global_order_idx,
+                        "PosicionAtributo": local_pos,
+                    }
+                )
+                global_order_idx += 1
+                local_pos += 1
+
+        if indicator_rows:
+            df_indicator_plot = pd.DataFrame(indicator_rows)
+            all_attrs = ["Encuentro", "Conexiones y Accesos", "Comodidad e Imagen", "Usos y Actividades"]
+            all_indicator_names = df_indicator_plot["Indicador"].tolist()
+
+            st.markdown("**Filtrar atributos (indicadores)**")
+            attr_cols_ind = st.columns(2)
+            selected_attrs_ind = []
+            for idx, attr_name in enumerate(all_attrs):
+                col = attr_cols_ind[idx % 2]
+                with col:
+                    if st.checkbox(attr_name, value=True, key=f"interactive_ind_attr_filter_{idx}"):
+                        selected_attrs_ind.append(attr_name)
+
+            show_all_indicators = st.checkbox(
+                "Mostrar todos los indicadores",
+                value=True,
+                key="interactive_ind_show_all",
+            )
+
+            if show_all_indicators:
+                selected_indicators = all_indicator_names
+            else:
+                st.markdown("**Selecciona indicadores**")
+                indicator_cols = st.columns(2)
+                selected_indicators = []
+                for idx, indicator_name in enumerate(all_indicator_names):
+                    col = indicator_cols[idx % 2]
+                    with col:
+                        if st.checkbox(indicator_name, value=True, key=f"interactive_ind_name_filter_{idx}"):
+                            selected_indicators.append(indicator_name)
+
+            empalmar_indicadores = st.toggle(
+                "Empalmar atributos en indicadores",
+                value=False,
+                key="overlay_indicators_by_attribute",
+            )
+
+            df_indicator_filtered = df_indicator_plot[
+                df_indicator_plot["Atributo"].isin(selected_attrs_ind)
+                & df_indicator_plot["Indicador"].isin(selected_indicators)
+            ].copy()
+
+            if df_indicator_filtered.empty:
+                st.info("No hay indicadores para mostrar con los filtros seleccionados.")
+            else:
+                df_ind_sorted = df_indicator_filtered.sort_values(["Atributo", "OrdenGlobal"]).copy()
+                x_col_ind = "PosicionAtributo" if empalmar_indicadores else "OrdenGlobal"
+                fig_ind_interactive = px.line(
+                    df_ind_sorted,
+                    x=x_col_ind,
+                    y="Valor",
+                    color="Atributo",
+                    markers=False,
+                    hover_name="Indicador",
+                    hover_data={"Atributo": True, "Valor": ":.1f", "OrdenGlobal": False, "PosicionAtributo": empalmar_indicadores},
+                    color_discrete_map=attribute_colors,
+                    category_orders={"Atributo": all_attrs},
+                )
+                fig_ind_interactive.update_traces(
+                    mode="lines",
+                    line=dict(width=3),
+                    hovertemplate="<b>%{hovertext}</b><br>Atributo: %{fullData.name}<br>Valor: %{y:.1f}<extra></extra>",
+                )
+                fig_ind_interactive.update_layout(
+                    title="Indicadores empalmados por atributo" if empalmar_indicadores else "Indicadores por atributo",
+                    xaxis_title="Posición dentro del atributo" if empalmar_indicadores else "Indicadores (ordenados)",
+                    yaxis_title="Puntaje",
+                    yaxis=dict(range=[0, 100]),
+                    clickmode="event+select",
+                    hovermode="closest",
+                    legend_title_text="Atributo",
+                    height=360,
+                    margin=dict(l=20, r=20, t=50, b=40),
+                )
+                if empalmar_indicadores:
+                    max_pos_ind = int(df_ind_sorted["PosicionAtributo"].max()) if not df_ind_sorted.empty else 1
+                    fig_ind_interactive.update_xaxes(tickmode="array", tickvals=list(range(1, max_pos_ind + 1)), ticktext=[str(i) for i in range(1, max_pos_ind + 1)])
+                else:
+                    fig_ind_interactive.update_xaxes(
+                        tickmode="array",
+                        tickvals=df_ind_sorted["OrdenGlobal"].tolist(),
+                        ticktext=df_ind_sorted["Indicador"].tolist(),
+                        tickangle=-35,
+                    )
+                st.plotly_chart(fig_ind_interactive, use_container_width=True)
+                if empalmar_indicadores:
+                    st.caption("Empalme activo: cada línea representa un atributo y la comparación se hace por posición interna. Pasa el cursor para ver nombre real del indicador.")
+                else:
+                    st.caption("Pasa el cursor sobre la línea para ver el nombre del indicador y su valor real.")
+
+                top_ind = df_indicator_filtered.nlargest(min(3, len(df_indicator_filtered)), "Valor")
+                bottom_ind = df_indicator_filtered.nsmallest(min(3, len(df_indicator_filtered)), "Valor")
+                fortalezas_ind = ", ".join([f"{r.Indicador} ({r.Valor:.1f})" for r in top_ind.itertuples()])
+                debilidades_ind = ", ".join([f"{r.Indicador} ({r.Valor:.1f})" for r in bottom_ind.itertuples()])
+
+                st.markdown("#### Interpretación (indicadores)")
+                st.write(
+                    f"Las principales fortalezas observadas son: {fortalezas_ind}. "
+                    f"Las principales debilidades son: {debilidades_ind}."
+                )
+                st.write(
+                    "**Recomendación:** mantener y documentar las prácticas de los indicadores altos, "
+                    "y enfocar acciones rápidas y medibles en los indicadores bajos para cerrar brechas entre atributos."
+                )
+
+    st.markdown("---")
+    st.markdown("### Intangibles por atributo")
+    if not PLOTLY_AVAILABLE:
+        detail = f" Detalle técnico: {PLOTLY_ERROR}" if PLOTLY_ERROR else ""
+        st.warning(f"No se pudo cargar Plotly para visualizaciones interactivas.{detail}")
+    else:
+        intang_rows = []
+        intang_global_order = 1
+        for sector_name, intang_map in [
+            ("Encuentro", intangibles_A1),
+            ("Conexiones y Accesos", intangibles_A2),
+            ("Comodidad e Imagen", intangibles_A3),
+            ("Usos y Actividades", intangibles_A4),
+        ]:
+            local_pos = 1
+            for intang_name, intang_value in intang_map.items():
+                if intang_value is None:
+                    local_pos += 1
+                    continue
+                intang_rows.append(
+                    {
+                        "Atributo": sector_name,
+                        "Intangible": intang_name,
+                        "Valor": float(intang_value),
+                        "OrdenGlobal": intang_global_order,
+                        "PosicionAtributo": local_pos,
+                    }
+                )
+                intang_global_order += 1
+                local_pos += 1
+
+        if intang_rows:
+            df_intang_plot = pd.DataFrame(intang_rows)
+            all_attrs_int = ["Encuentro", "Conexiones y Accesos", "Comodidad e Imagen", "Usos y Actividades"]
+            all_intang_names = df_intang_plot["Intangible"].tolist()
+
+            st.markdown("**Filtrar atributos (intangibles)**")
+            attr_cols_int = st.columns(2)
+            selected_attrs_int = []
+            for idx, attr_name in enumerate(all_attrs_int):
+                col = attr_cols_int[idx % 2]
+                with col:
+                    if st.checkbox(attr_name, value=True, key=f"interactive_int_attr_filter_{idx}"):
+                        selected_attrs_int.append(attr_name)
+
+            show_all_intangibles = st.checkbox(
+                "Mostrar todos los intangibles",
+                value=True,
+                key="interactive_int_show_all",
+            )
+
+            if show_all_intangibles:
+                selected_intang = all_intang_names
+            else:
+                st.markdown("**Selecciona intangibles**")
+                intang_cols = st.columns(2)
+                selected_intang = []
+                for idx, intang_name in enumerate(all_intang_names):
+                    col = intang_cols[idx % 2]
+                    with col:
+                        if st.checkbox(intang_name, value=True, key=f"interactive_int_name_filter_{idx}"):
+                            selected_intang.append(intang_name)
+
+            empalmar_intangibles = st.toggle(
+                "Empalmar atributos en intangibles",
+                value=False,
+                key="overlay_intangibles_by_attribute",
+            )
+
+            df_intang_filtered = df_intang_plot[
+                df_intang_plot["Atributo"].isin(selected_attrs_int)
+                & df_intang_plot["Intangible"].isin(selected_intang)
+            ].copy()
+
+            if df_intang_filtered.empty:
+                st.info("No hay intangibles para mostrar con los filtros seleccionados.")
+            else:
+                df_int_sorted = df_intang_filtered.sort_values(["Atributo", "OrdenGlobal"]).copy()
+                x_col_int = "PosicionAtributo" if empalmar_intangibles else "OrdenGlobal"
+                fig_int_interactive = px.line(
+                    df_int_sorted,
+                    x=x_col_int,
+                    y="Valor",
+                    color="Atributo",
+                    markers=False,
+                    hover_name="Intangible",
+                    hover_data={"Atributo": True, "Valor": ":.1f", "OrdenGlobal": False, "PosicionAtributo": empalmar_intangibles},
+                    color_discrete_map=attribute_colors,
+                    category_orders={"Atributo": all_attrs_int},
+                )
+                fig_int_interactive.update_traces(
+                    mode="lines",
+                    line=dict(width=3),
+                    hovertemplate="<b>%{hovertext}</b><br>Atributo: %{fullData.name}<br>Valor: %{y:.1f}<extra></extra>",
+                )
+                fig_int_interactive.update_layout(
+                    title="Intangibles empalmados por atributo" if empalmar_intangibles else "Intangibles por atributo",
+                    xaxis_title="Posición dentro del atributo" if empalmar_intangibles else "Intangibles (ordenados)",
+                    yaxis_title="Puntaje",
+                    yaxis=dict(range=[0, 100]),
+                    clickmode="event+select",
+                    hovermode="closest",
+                    legend_title_text="Atributo",
+                    height=360,
+                    margin=dict(l=20, r=20, t=50, b=40),
+                )
+                if empalmar_intangibles:
+                    max_pos_int = int(df_int_sorted["PosicionAtributo"].max()) if not df_int_sorted.empty else 1
+                    fig_int_interactive.update_xaxes(tickmode="array", tickvals=list(range(1, max_pos_int + 1)), ticktext=[str(i) for i in range(1, max_pos_int + 1)])
+                else:
+                    fig_int_interactive.update_xaxes(
+                        tickmode="array",
+                        tickvals=df_int_sorted["OrdenGlobal"].tolist(),
+                        ticktext=df_int_sorted["Intangible"].tolist(),
+                        tickangle=-35,
+                    )
+                st.plotly_chart(fig_int_interactive, use_container_width=True)
+                if empalmar_intangibles:
+                    st.caption("Empalme activo: cada línea representa un atributo y la comparación se hace por posición interna. Pasa el cursor para ver nombre real del intangible.")
+                else:
+                    st.caption("Pasa el cursor sobre la línea para ver el nombre del intangible y su valor real.")
+
+                top_int = df_intang_filtered.nlargest(min(3, len(df_intang_filtered)), "Valor")
+                bottom_int = df_intang_filtered.nsmallest(min(3, len(df_intang_filtered)), "Valor")
+                fortalezas_int = ", ".join([f"{r.Intangible} ({r.Valor:.1f})" for r in top_int.itertuples()])
+                debilidades_int = ", ".join([f"{r.Intangible} ({r.Valor:.1f})" for r in bottom_int.itertuples()])
+
+                st.markdown("#### Interpretación (intangibles)")
+                st.write(
+                    f"Las principales fortalezas observadas son: {fortalezas_int}. "
+                    f"Las principales debilidades son: {debilidades_int}."
+                )
+                st.write(
+                    "**Recomendación:** consolidar los intangibles fuertes con acciones de continuidad comunitaria, "
+                    "y priorizar mejoras tácticas en los intangibles bajos para elevar percepción, uso y apropiación del lugar."
+                )
 
     # ===== Interpretación de resultados will be placed after the main diagram =====
     # Define helper function for performance levels
@@ -3435,7 +4573,7 @@ def pagina_resultados():
             "Local": 33,
             "Sostenible": 24,
             "Conmemorativo": 15,
-            "Comunitario": 5,
+            "Pertenencia": 5,
         },
     }
 
@@ -3497,9 +4635,9 @@ def pagina_resultados():
     theta_start = 0.0
     theta_end = np.pi / 2.0
     theta_range = theta_end - theta_start
-    r_inner_min_q, r_inner_max_q = 0.00, 0.20
-    r_mid_min_q, r_mid_max_q = 0.20, 0.55
-    r_outer_min_q, r_outer_max_q = 0.55, 0.95
+    r_inner_min_q, r_inner_max_q = 0.00, 0.17
+    r_mid_min_q, r_mid_max_q = 0.17, 0.53
+    r_outer_min_q, r_outer_max_q = 0.53, 0.95
 
     fig_q, ax_q = plt.subplots(
         figsize=(4.5, 4.5),
@@ -3591,6 +4729,7 @@ def pagina_resultados():
                 r_mid_label,
                 etiqueta,
                 fontsize=6,
+                fontname="Poppins",
                 rotation=rot,
                 rotation_mode="anchor",
                 ha="left",
@@ -3648,6 +4787,7 @@ def pagina_resultados():
                 r_outer_label,
                 etiqueta,
                 fontsize=7,
+                fontname="Poppins",
                 rotation=rot,
                 rotation_mode="anchor",
                 ha="left",
@@ -3816,7 +4956,7 @@ def pagina_resultados():
     df_indicadores = pd.DataFrame(
         {
             "Indicador": indicador_labels,
-            "Valor (0–100)": [f"{nz(v):.1f}" for v in ind_vals],
+            "Valor (0–100)": [format_score_with_na(v) for v in ind_vals],
         }
     )
     st.table(df_indicadores)
@@ -3828,7 +4968,7 @@ def pagina_resultados():
     df_intang = pd.DataFrame(
         {
             "Intangible": intangible_names,
-            "Valor (0–100)": [f"{nz(v):.1f}" for v in intangible_vals],
+            "Valor (0–100)": [format_score_with_na(v) for v in intangible_vals],
         }
     )
     st.table(df_intang)
@@ -3842,33 +4982,33 @@ def pagina_resultados():
         "programa": program_id,
         "genero_id": ans.get("A0_1"),
         "equipo_responsable_id": A0_3,
-        "A1.1": A1_1,
-        "A1.2": A1_2,
-        "A1.3": A1_3,
-        "A1.4": A1_4,
-        "A1.5": A1_5,
+        "A1.1": A1_indicators["A1.1"],
+        "A1.2": A1_indicators["A1.2"],
+        "A1.3": A1_indicators["A1.3"],
+        "A1.4": A1_indicators["A1.4"],
+        "A1.5": A1_indicators["A1.5"],
         "A1_total": A1_total,
-        "A2.1": A2_1,
-        "A2.2": A2_2,
-        "A2.3": A2_3,
-        "A2.4": A2_4,
-        "A2.5": A2_5,
-        "A2.6": A2_6,
+        "A2.1": A2_indicators["A2.1"],
+        "A2.2": A2_indicators["A2.2"],
+        "A2.3": A2_indicators["A2.3"],
+        "A2.4": A2_indicators["A2.4"],
+        "A2.5": A2_indicators["A2.5"],
+        "A2.6": A2_indicators["A2.6"],
         "A2_total": A2_total,
-        "A3.1": A3_1,
-        "A3.2": A3_2,
-        "A3.3": A3_3,
-        "A3.4": A3_4,
-        "A3.5": A3_5,
-        "A3.6": A3_6,
-        "A3.7": A3_7,
+        "A3.1": A3_indicators["A3.1"],
+        "A3.2": A3_indicators["A3.2"],
+        "A3.3": A3_indicators["A3.3"],
+        "A3.4": A3_indicators["A3.4"],
+        "A3.5": A3_indicators["A3.5"],
+        "A3.6": A3_indicators["A3.6"],
+        "A3.7": A3_indicators["A3.7"],
         "A3_total": A3_total,
-        "A4.1": A4_1,
-        "A4.2": A4_2,
-        "A4.3": A4_3,
-        "A4.4": A4_4,
-        "A4.5": A4_5,
-        "A4.6": A4_6,
+        "A4.1": A4_indicators["A4.1"],
+        "A4.2": A4_indicators["A4.2"],
+        "A4.3": A4_indicators["A4.3"],
+        "A4.4": A4_indicators["A4.4"],
+        "A4.5": A4_indicators["A4.5"],
+        "A4.6": A4_indicators["A4.6"],
         "A4_total": A4_total,
         "global_score": global_score,
     }
@@ -3907,6 +5047,9 @@ sections = [
     ("Usos y Actividades", pagina_A4),
 ]
 tab_labels = [name for name, _ in sections] + ["Resultados"]
+st.markdown(
+    "Recorre todas las pestañas de atributos para completar la evaluación y al final revisa tus resultados en la pestaña **Resultados**."
+)
 st.markdown("<div id='tab_selector'></div>", unsafe_allow_html=True)
 st.markdown(
     """
@@ -3962,12 +5105,6 @@ tabs = st.tabs(tab_labels)
 for tab, (_, render_section) in zip(tabs[: len(sections)], sections):
     with tab:
         render_section()
-        st.markdown(
-            "<div style='margin-top: 12px; text-align:center;'>"
-            "<a href='#tab_selector' class='tab-selector-link'>"
-            "Volver al selector de pestañas</a></div>",
-            unsafe_allow_html=True,
-        )
 
 with tabs[-1]:
     st.button(
@@ -3983,9 +5120,9 @@ with tabs[-1]:
         key="btn_restart",
         use_container_width=True,
     )
-    st.markdown(
-        "<div style='margin-top: 12px; text-align:center;'>"
-        "<a href='#tab_selector' class='tab-selector-link'>"
-        "Volver al selector de pestañas</a></div>",
-        unsafe_allow_html=True,
-    )
+
+render_floating_back_to_top()
+st.markdown(
+    "<div style='text-align:center; margin-top:1.25rem; opacity:0.8;'>©FPM - José Bucio 2026</div>",
+    unsafe_allow_html=True,
+)

@@ -270,38 +270,31 @@ h1, h2, h3, h4, h5, h6,
   + div span {
   color: var(--indigo);
 }
-/* ===== Slider: tramo activo morado ===== */
-:root {
-  --slider-purple: #685BC7;
-  --slider-neutral: #D6D9E3; /* tramo no activo */
+/* ================= SLIDER STREAMLIT — SOLO COLORES ================= */
+
+/* 1. Thumb (bolita) */
+div[role="slider"] {
+  background-color: #685BC7 !important;       /* bolita índigo */
+  border: 2px solid #685BC7 !important;       /* borde índigo */
+  box-shadow: 0 0 0 0.25rem rgba(104, 91, 199, 0.35) !important;  /* halo morado */
+  outline: none !important;
 }
 
-/* Bolita */
-div[data-testid="stSlider"] div[role="slider"] {
-  background-color: var(--slider-purple) !important;
-  border: 2px solid var(--slider-purple) !important;
-  box-shadow: 0 0 0 0.22rem rgba(104, 91, 199, 0.28) !important;
+/* 2. Burbuja del número (19, 59, etc.) */
+div[data-testid="stSliderThumbValue"] {
+  background-color: #685BC7 !important;  /* fondo índigo */
+  color: #F4EFE2 !important;             /* texto claro */
+  border-radius: 999px !important;
+  padding: 0.1rem 0.5rem !important;
 }
 
-/* Burbuja del valor */
-div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
-  background-color: var(--slider-purple) !important;
-  border-color: var(--slider-purple) !important;
-}
-div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {
-  color: #fff !important;
-}
-
-/* Barra: no activo neutro */
-div[data-testid="stSlider"] [data-baseweb="slider"] > div > div {
-  background-color: var(--slider-neutral) !important;
-}
-
-/* Barra: activo morado */
-div[data-testid="stSlider"] [data-baseweb="slider"] > div > div > div {
-  background-color: var(--slider-purple) !important;
-}
-
+   /* Barra del slider: tramo seleccionado y no seleccionado en índigo */
+   div.stSlider.st-emotion-cache-igqoeg.e10fdlpp0
+     div.st-emotion-cache-1rr4qq7.e10fdlpp3
+     > div[style*="0.25rem"] {
+     /* Recoloreamos lo que pinte Streamlit */
+     filter: hue-rotate(250deg) saturate(1.2);
+   }
    
    /* ===================== DROPDOWNS (SELECTBOX / MULTISELECT) ===================== */
 
@@ -351,6 +344,100 @@ div[data-testid="stSlider"] [data-baseweb="slider"] > div > div > div {
 .stMultiSelect div[data-baseweb="select"] span {
     color: var(--space); /* mismo color de texto que el resto */
     font-family: 'Poppins', sans-serif !important;
+}
+
+/* Opciones seleccionadas dentro del menú desplegable */
+.stSelectbox [role="option"][aria-selected="true"],
+.stMultiSelect [role="option"][aria-selected="true"] {
+  background-color: var(--indigo) !important;
+  color: var(--offwhite) !important;
+}
+
+/* Soporte extra para capas internas que Streamlit/BaseWeb pinta con divs dinámicos */
+.stSelectbox [role="option"][aria-selected="true"] > div,
+.stMultiSelect [role="option"][aria-selected="true"] > div {
+  background-color: var(--indigo) !important;
+  color: var(--offwhite) !important;
+}
+
+/* Hover del seleccionado (tono space blue) */
+.stSelectbox [role="option"][aria-selected="true"]:hover,
+.stMultiSelect [role="option"][aria-selected="true"]:hover,
+.stSelectbox [role="option"][aria-selected="true"] > div:hover,
+.stMultiSelect [role="option"][aria-selected="true"] > div:hover {
+  background-color: var(--space) !important;
+  color: var(--offwhite) !important;
+}
+
+/* Chips del multiselect (selecciones activas) */
+.stMultiSelect div[data-baseweb="tag"] {
+  background-color: var(--indigo) !important;
+  border: 1px solid var(--indigo) !important;
+  border-radius: 999px !important;
+  box-shadow: none !important;
+  padding: 0.1rem 0.45rem !important;
+}
+
+/* Texto del chip */
+.stMultiSelect div[data-baseweb="tag"] > span[title] {
+  color: var(--offwhite) !important;
+  font-family: 'Poppins', sans-serif !important;
+  font-weight: 600 !important;
+  font-size: 0.88rem !important;
+}
+
+/* Botón/ícono de eliminar en el chip */
+.stMultiSelect div[data-baseweb="tag"] span[aria-hidden="true"][role="presentation"] {
+  color: var(--offwhite) !important;
+}
+
+.stMultiSelect div[data-baseweb="tag"] span[aria-hidden="true"][role="presentation"] svg,
+.stMultiSelect div[data-baseweb="tag"] span[aria-hidden="true"][role="presentation"] svg path {
+  fill: var(--offwhite) !important;
+  color: var(--offwhite) !important;
+}
+
+.stMultiSelect div[data-baseweb="tag"]:hover {
+  background-color: var(--space) !important;
+  border-color: var(--space) !important;
+}
+
+/* Override específico para selectores de filtros: fondo blanco */
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="select"],
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="select"] > div,
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="select"],
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="select"] > div,
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="select"],
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="select"] > div,
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="select"],
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="select"] > div,
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="tag"] > span[title] {
+  background-color: var(--white) !important;
+}
+
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="tag"],
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="tag"] {
+  border: 1px solid var(--blue) !important;
+}
+
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_ind_attr_filter .stMultiSelect div[data-baseweb="select"] span,
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_ind_name_filter .stMultiSelect div[data-baseweb="select"] span,
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_int_attr_filter .stMultiSelect div[data-baseweb="select"] span,
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="tag"] > span[title],
+.stElementContainer.st-key-interactive_int_name_filter .stMultiSelect div[data-baseweb="select"] span {
+  color: var(--space) !important;
 }
 
 /* ===================== CHECKBOX PERSONALIZADA ===================== */
@@ -503,6 +590,11 @@ div[data-testid="stNumberInput"] button svg {
   fill:  #4f46e5 !important;
 }
 
+/* Override solicitado: reemplazar rojo dinámico por indigo del tema */
+.st-c2 {
+  background-color: var(--indigo) !important;
+}
+
 /* Si también quieres que el propio botón use ese color */
 div[data-testid="stNumberInput"] button {
   color: #4f46e5 !important;
@@ -535,170 +627,4 @@ div[data-testid="stNumberInput"] button:focus svg {
 .st-emotion-cache-1py5frv:hover {
     border-color: #4f46e5 !important;
 }
-
-/* =========================================================
-   MOBILE + DEVICE DARK MODE: FORCE LIGHT VISUALS
-   Put this block at the END of style.css
-   ========================================================= */
-@media (max-width: 768px) and (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: light !important; /* force light controls */
-  }
-
-  html, body,
-  .stApp,
-  [data-testid="stAppViewContainer"],
-  [data-testid="stMain"],
-  [data-testid="stAppViewBlockContainer"] {
-    background: var(--offwhite) !important;
-    color: var(--space) !important;
-  }
-
-  [data-testid="stSidebar"] {
-    background: #ffffff !important;
-    color: var(--space) !important;
-  }
-
-  /* Text */
-  h1, h2, h3, h4, h5, h6,
-  p, span, label, li,
-  .stMarkdown, [data-testid="stMarkdownContainer"] * {
-    color: var(--space) !important;
-  }
-
-  /* Inputs/selects */
-  .stTextInput input,
-  .stNumberInput input,
-  .stTextArea textarea,
-  .stDateInput input,
-  div[data-baseweb="input"] input,
-  div[data-baseweb="base-input"] input,
-  div[data-baseweb="select"] > div {
-    background: #ffffff !important;
-    color: var(--space) !important;
-    -webkit-text-fill-color: var(--space) !important;
-    border-color: #cbd5e1 !important;
-  }
-
-  .stTextInput input::placeholder,
-  .stNumberInput input::placeholder,
-  .stTextArea textarea::placeholder {
-    color: #64748b !important;
-    opacity: 1 !important;
-  }
-
-  /* Buttons */
-  .stButton > button,
-  .stDownloadButton > button,
-  [data-testid="stLinkButton"] > a {
-    background: var(--space) !important;
-    color: #ffffff !important;
-    border-color: var(--space) !important;
-  }
-
-  .stButton > button:hover,
-  .stDownloadButton > button:hover,
-  [data-testid="stLinkButton"] > a:hover {
-    background: var(--indigo) !important;
-    color: #ffffff !important;
-    border-color: var(--indigo) !important;
-  }
-
-  /* Tabs */
-  [data-baseweb="tab"] {
-    color: var(--space) !important;
-  }
-  [data-baseweb="tab"][aria-selected="true"] {
-    background: var(--space) !important;
-    color: #ffffff !important;
-  }
-
-  /* Tables */
-  .stTable, .stTable table {
-    background: #ffffff !important;
-    color: var(--space) !important;
-  }
-  .stTable thead th {
-    background: var(--indigo) !important;
-    color: #ffffff !important;
-  }
-  .stTable tbody td {
-    color: var(--space) !important;
-    background: #ffffff !important;
-  }
-
-  /* Radio / checkbox text */
-  .stRadio label, .stCheckbox label,
-  .stRadio p, .stCheckbox p {
-    color: var(--space) !important;
-  }
-}
-
-/* Keep text color same as light mode when device is in dark mode */
-@media (prefers-color-scheme: dark) {
-  html, body, .stApp, [data-testid="stAppViewContainer"] {
-    color: var(--space) !important;
-  }
-
-  h1, h2, h3, h4, h5, h6,
-  p, span, label, li,
-  .stMarkdown, [data-testid="stMarkdownContainer"] * {
-    color: var(--space) !important;
-  }
-
-  /* mobile Safari form text */
-  input, textarea, select {
-    color: var(--space) !important;
-    -webkit-text-fill-color: var(--space) !important;
-  }
-}
-
-@media (max-width: 900px) and (prefers-color-scheme: dark) {
-  /* Buttons (except tabs): force white text */
-  .stButton > button,
-  .stDownloadButton > button,
-  [data-testid="stLinkButton"] > a {
-    color: #ffffff !important;
-  }
-
-  /* Tabs: only selected tab text white */
-  [data-baseweb="tab"][aria-selected="true"] {
-    color: #ffffff !important;
-  }
-
-  /* Dropdown text white */
-  div[data-baseweb="select"] span,
-  div[data-baseweb="select"] input,
-  div[data-baseweb="popover"] [role="option"] {
-    color: #ffffff !important;
-    -webkit-text-fill-color: #ffffff !important;
-  }
-}
-
-/* ===== PATCH: slider morado (685BC7), sin rojo ===== */
-:root {
-  --slider-purple: #685BC7;
-}
-
-/* Bolita */
-div[data-testid="stSlider"] div[role="slider"] {
-  background-color: var(--slider-purple) !important;
-  border: 2px solid var(--slider-purple) !important;
-  box-shadow: 0 0 0 0.22rem rgba(104, 91, 199, 0.28) !important;
-}
-
-/* Burbuja del valor */
-div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
-  background-color: var(--slider-purple) !important;
-  border-color: var(--slider-purple) !important;
-}
-div[data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {
-  color: #ffffff !important;
-}
-
-/* Barra del slider (evita tono rojo) */
-div[data-testid="stSlider"] div[style*="height: 0.25rem"] {
-  background-color: var(--slider-purple) !important;
-}
-
 

@@ -1,0 +1,219 @@
+/* style.css */
+
+/* Importa la fuente Poppins al inicio del archivo */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+
+/* Variables CSS para los colores de acento que no están en config.toml */
+:root {
+    --accent-1: #4b295e; /* Encuentro */
+    --accent-2: #ec6420; /* Usos y Actividades */
+    --accent-3: #0087c4; /* Conexiones y Accesos */
+    --accent-4: #1c301d; /* Comodidad e Imagen */
+
+    /* Variables para los componentes personalizados */
+    --slider-track: #e6eef0;
+    --slider-thumb: #2c3e50;
+}
+/* Contenedor de la barra de progreso (“pista” vacía)  */
+div[data-testid="stProgress"] div[role="progressbar"] {
+  background-color: var(--progress-bg);  /* ahora será blanco */
+  border-radius: 8px;
+  height: 18px;
+}
+
+/* Relleno de la barra (la parte que avanza) */
+div[data-testid="stProgress"] div[role="progressbar"] > div {
+  background-color: var(--progress-fill);
+  border-radius: 8px;
+  height: 18px;
+}
+
+/* Fuente global Poppins */
+html, body, [class*="st-"], label, div {
+    font-family: 'Poppins', sans-serif;
+}
+
+/* Ensure all headers and Streamlit-generated titles use the same font */
+h1, h2, h3, h4, h5, h6,
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6,
+[data-testid="stAppViewContainer"] h1, [data-testid="stAppViewContainer"] h2,
+.stHeader, .stTitle {
+    font-family: 'Poppins', sans-serif !important;
+    font-weight: 400 !important;
+    line-height: 1.2 !important;
+}
+
+/* Bloques de atributo personalizados */
+.bloque-atributo {
+    border-left: 6px solid #ccc;
+    padding-left: 15px;
+    margin-bottom: 1.5rem;
+}
+.bloque-encuentro  { border-color: var(--accent-1); }
+.bloque-usos       { border-color: var(--accent-2); }
+.bloque-conexiones { border-color: var(--accent-3); }
+.bloque-comodidad  { border-color: var(--accent-4); }
+
+.bloque-atributo h3 {
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+}
+.bloque-encuentro h3  { color: var(--accent-1); }
+.bloque-usos h3       { color: var(--accent-2); }
+.bloque-conexiones h3 { color: var(--accent-3); }
+.bloque-comodidad h3  { color: var(--accent-4); }
+
+/* Barra de progreso personalizada */
+div[data-testid="stProgress"] div[role="progressbar"] {
+    background-color: var(--progress-bg);
+    border-radius: 8px;
+    height: 18px;
+}
+div[data-testid="stProgress"] div[role="progressbar"] > div {
+    background-color: var(--progress-fill);
+    border-radius: 8px;
+    height: 18px;
+}
+
+/* Estilos de impresión para ocultar la UI de Streamlit */
+@media print {
+    header[data-testid="stHeader"],
+    footer,
+    div[data-testid="stToolbar"],
+    .stDeployButton {
+        display: none !important;
+    }
+}
+
+/* --------------------------------------------------
+   Slider styling: track, thumb and accent color
+   Applies to Streamlit sliders (input[type="range"]).
+   You can change the colors via the CSS variables above:
+   --slider-track, --slider-thumb, --progress-fill
+   -------------------------------------------------- */
+
+/* Base reset for ranges */
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    background: transparent;
+    accent-color: var(--progress-fill);
+}
+
+/* WebKit track */
+input[type="range"]::-webkit-slider-runnable-track {
+    height: 8px;
+    background: var(--slider-track);
+    border-radius: 999px;
+}
+
+/* WebKit thumb */
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    margin-top: -5px; /* roughly center the thumb */
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--slider-thumb);
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+/* Firefox track & thumb */
+input[type="range"]::-moz-range-track {
+    height: 8px;
+    background: var(--slider-track);
+    border-radius: 999px;
+}
+input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--slider-thumb);
+    border: 2px solid #ffffff;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+/* IE/Edge fallback */
+input[type="range"]::-ms-track {
+    height: 8px;
+    background: transparent;
+    border-color: transparent;
+}
+input[type="range"]::-ms-fill-lower {
+    background: var(--slider-track);
+    border-radius: 999px;
+}
+input[type="range"]::-ms-fill-upper {
+    background: var(--slider-track);
+    border-radius: 999px;
+}
+
+/* Optional: narrower slider containers in Streamlit columns */
+.stSlider input[type="range"] {
+    min-width: 160px;
+}
+
+/* Stronger overrides for Streamlit slider wrappers and edge cases.
+   Uses high-specificity selectors and !important to override Streamlit styles. */
+[data-testid="stSlider"] input[type="range"],
+.stSlider input[type="range"],
+div[data-testid="stSlider"] input[type="range"],
+input[type="range"][role="slider"],
+input[role="slider"] {
+    -webkit-appearance: none !important;
+    appearance: none !important;
+    background: transparent !important;
+    accent-color: var(--progress-fill) !important;
+}
+
+/* WebKit track override */
+[data-testid="stSlider"] input[type="range"]::-webkit-slider-runnable-track,
+.stSlider input[type="range"]::-webkit-slider-runnable-track,
+input[type="range"]::-webkit-slider-runnable-track {
+    height: 8px !important;
+    background: var(--slider-track) !important;
+    border-radius: 999px !important;
+}
+
+/* WebKit thumb override */
+[data-testid="stSlider"] input[type="range"]::-webkit-slider-thumb,
+.stSlider input[type="range"]::-webkit-slider-thumb,
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none !important;
+    width: 18px !important;
+    height: 18px !important;
+    border-radius: 50% !important;
+    background: var(--progress-fill) !important;
+    border: 2px solid #fff !important;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12) !important;
+    margin-top: -5px !important;
+}
+
+/* Firefox overrides */
+[data-testid="stSlider"] input[type="range"]::-moz-range-track,
+.stSlider input[type="range"]::-moz-range-track,
+input[type="range"]::-moz-range-track {
+    height: 8px !important;
+    background: var(--slider-track) !important;
+    border-radius: 999px !important;
+}
+[data-testid="stSlider"] input[type="range"]::-moz-range-thumb,
+.stSlider input[type="range"]::-moz-range-thumb,
+input[type="range"]::-moz-range-thumb {
+    width: 18px !important;
+    height: 18px !important;
+    border-radius: 50% !important;
+    background: var(--progress-fill) !important;
+    border: 2px solid #fff !important;
+    box-shadow: 2px solid #fff !important;
+}
+
+/* Ensure the filled track color uses the accent where supported */
+input[type="range"] {
+    accent-color: var(--progress-fill) !important;
+}
+
+/* assets/styles.css */
