@@ -3734,7 +3734,7 @@ def pagina_resultados():
         df_selected["Categoría"] = df_selected["Categoría"].replace({"Mediana": "Media"})
         panel_order = ["Peores", "Media", "Mejores"]
         panel_display_names = {
-            "Peores": "oportunidades",
+            "Peores": "Oportunidades",
             "Media": "Promedio",
             "Mejores": "Fortalezas",
         }
