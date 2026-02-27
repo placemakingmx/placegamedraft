@@ -3734,7 +3734,7 @@ def pagina_resultados():
         df_selected["Categoría"] = df_selected["Categoría"].replace({"Mediana": "Media"})
         panel_order = ["Peores", "Media", "Mejores"]
         panel_display_names = {
-            "Peores": "Debilidades",
+            "Peores": "oportunidades",
             "Media": "Promedio",
             "Mejores": "Fortalezas",
         }
@@ -3837,7 +3837,7 @@ def pagina_resultados():
             "Los resultados muestran tres grupos claros de intangibles. "
             f"En **Fortalezas** destacan: {mejores_nombres}. "
             f"En **Promedio** se ubican: {media_nombres}. "
-            f"En **Debilidades** aparecen: {peores_nombres}."
+            f"En **oportunidades** aparecen: {peores_nombres}."
         )
         st.write(
             "**Recomendaciones:** (1) proteger y replicar en otros atributos las prácticas que sostienen los intangibles de Mejores; "
@@ -4020,12 +4020,12 @@ def pagina_resultados():
                 top_ind = df_indicator_filtered.nlargest(min(3, len(df_indicator_filtered)), "Valor")
                 bottom_ind = df_indicator_filtered.nsmallest(min(3, len(df_indicator_filtered)), "Valor")
                 fortalezas_ind = ", ".join([f"{r.Indicador} ({r.Valor:.1f})" for r in top_ind.itertuples()])
-                debilidades_ind = ", ".join([f"{r.Indicador} ({r.Valor:.1f})" for r in bottom_ind.itertuples()])
+                oportunidades_ind = ", ".join([f"{r.Indicador} ({r.Valor:.1f})" for r in bottom_ind.itertuples()])
 
                 st.markdown("#### Interpretación (indicadores)")
                 st.write(
                     f"Las principales fortalezas observadas son: {fortalezas_ind}. "
-                    f"Las principales debilidades son: {debilidades_ind}."
+                    f"Las principales oportunidades son: {oportunidades_ind}."
                 )
                 st.write(
                     "**Recomendación:** mantener y documentar las prácticas de los indicadores altos, "
@@ -4157,12 +4157,12 @@ def pagina_resultados():
                 top_int = df_intang_filtered.nlargest(min(3, len(df_intang_filtered)), "Valor")
                 bottom_int = df_intang_filtered.nsmallest(min(3, len(df_intang_filtered)), "Valor")
                 fortalezas_int = ", ".join([f"{r.Intangible} ({r.Valor:.1f})" for r in top_int.itertuples()])
-                debilidades_int = ", ".join([f"{r.Intangible} ({r.Valor:.1f})" for r in bottom_int.itertuples()])
+                oportunidades_int = ", ".join([f"{r.Intangible} ({r.Valor:.1f})" for r in bottom_int.itertuples()])
 
                 st.markdown("#### Interpretación (intangibles)")
                 st.write(
                     f"Las principales fortalezas observadas son: {fortalezas_int}. "
-                    f"Las principales debilidades son: {debilidades_int}."
+                    f"Las principales oportunidades son: {oportunidades_int}."
                 )
                 st.write(
                     "**Recomendación:** consolidar los intangibles fuertes con acciones de continuidad comunitaria, "
