@@ -117,6 +117,47 @@ SHEET_COLUMNS = [
     "global_score",
 ]
 
+SHEET_COLUMNS_PRE = [
+    "nombre_lugar",
+    "nombre_evaluador",
+    "programa",
+    "genero_id",
+    "equipo_responsable_id",
+    "B1.1",
+    "B1.2",
+    "B1.3",
+    "B1.4",
+    "B1.5",
+    "B1_total",
+    "B2.1",
+    "B2.2",
+    "B2.3",
+    "B2.4",
+    "B2.5",
+    "B2.6",
+    "B2_total",
+    "B3.1",
+    "B3.2",
+    "B3.3",
+    "B3.4",
+    "B3.5",
+    "B3.6",
+    "B3.7",
+    "B3_total",
+    "B4.1",
+    "B4.2",
+    "B4.3",
+    "B4.4",
+    "B4.5",
+    "B4.6",
+    "B4_total",
+    "global_score",
+]
+
+
+def get_sheet_columns_for_mode() -> list[str]:
+    return SHEET_COLUMNS_PRE if get_survey_mode() == "PRE" else SHEET_COLUMNS
+
 
 def _safe_secrets() -> dict:
     try:
@@ -153,9 +194,78 @@ def append_to_google_sheet(row_data: dict) -> tuple[bool, str]:
     client = gspread.service_account_from_dict(secrets["gcp_service_account"])
     worksheet = client.open_by_url(sheet_url).worksheet(sheet_tab)
 
-    row = [row_data.get(col, "") for col in SHEET_COLUMNS]
+    columns = get_sheet_columns_for_mode()
+    row = [row_data.get(col, "") for col in columns]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
     return True, "OK"
+
+
+def _get_sheet_tabs_for_lookup() -> list[str]:
+    """Return candidate worksheet tabs to query for comparisons."""
+    _, default_tab = _get_sheet_config()
+    secrets = _safe_secrets()
+    candidates = [
+        default_tab,
+        secrets.get("google_sheet_tab_post") if "google_sheet_tab_post" in secrets else os.getenv("GOOGLE_SHEET_TAB_POST"),
+        secrets.get("google_sheet_tab_pre") if "google_sheet_tab_pre" in secrets else os.getenv("GOOGLE_SHEET_TAB_PRE"),
+    ]
+    tabs = []
+    for tab in candidates:
+        if tab and tab not in tabs:
+            tabs.append(tab)
+    return tabs
+
+
+def fetch_comparison_rows_from_google_sheet(target_prefix: str) -> tuple[bool, str, list[dict]]:
+    """Fetch PRE/POST candidate rows from configured Google Sheet tabs."""
+    if not GSPREAD_AVAILABLE:
+        detail = f" Detalle técnico: {GSPREAD_ERROR}" if GSPREAD_ERROR else ""
+        return False, f"No se pudo cargar gspread.{detail}", []
+
+    sheet_url, _ = _get_sheet_config()
+    if not sheet_url:
+        return False, "Falta GOOGLE_SHEET_URL en st.secrets o variables de entorno.", []
+
+    secrets = _safe_secrets()
+    if "gcp_service_account" not in secrets:
+        return False, "Falta gcp_service_account en st.secrets.", []
+
+    required_cols = [
+        f"{target_prefix}1.1", f"{target_prefix}1.2", f"{target_prefix}1.3", f"{target_prefix}1.4", f"{target_prefix}1.5",
+        f"{target_prefix}2.1", f"{target_prefix}2.2", f"{target_prefix}2.3", f"{target_prefix}2.4", f"{target_prefix}2.5", f"{target_prefix}2.6",
+        f"{target_prefix}3.1", f"{target_prefix}3.2", f"{target_prefix}3.3", f"{target_prefix}3.4", f"{target_prefix}3.5", f"{target_prefix}3.6", f"{target_prefix}3.7",
+        f"{target_prefix}4.1", f"{target_prefix}4.2", f"{target_prefix}4.3", f"{target_prefix}4.4", f"{target_prefix}4.5", f"{target_prefix}4.6",
+    ]
+
+    try:
+        client = gspread.service_account_from_dict(secrets["gcp_service_account"])
+        spreadsheet = client.open_by_url(sheet_url)
+        tabs = _get_sheet_tabs_for_lookup()
+        rows = []
+        for tab_name in tabs:
+            try:
+                worksheet = spreadsheet.worksheet(tab_name)
+            except Exception:
+                continue
+            records = worksheet.get_all_records(default_blank="")
+            if not records:
+                continue
+            for idx, row in enumerate(records, start=2):
+                if not all(col in row for col in required_cols):
+                    continue
+                indicator_values = [row.get(col) for col in required_cols]
+                if all((v is None or str(v).strip() == "") for v in indicator_values):
+                    continue
+                rows.append(
+                    {
+                        **row,
+                        "_sheet_tab": tab_name,
+                        "_sheet_row": idx,
+                    }
+                )
+        return True, "OK", rows
+    except Exception as exc:
+        return False, f"No se pudieron recuperar filas de Google Sheets: {exc}", []
 
 
 # ──────────────────────────────────────────
@@ -201,6 +311,10 @@ if LOGO_PATH.exists():
 # Initialize core state
 if "answers" not in st.session_state:
     st.session_state["answers"] = {}
+if "survey_mode" not in st.session_state:
+    st.session_state["survey_mode"] = "POST"
+if "mode_switch_pending" not in st.session_state:
+    st.session_state["mode_switch_pending"] = False
 if "save_pending" not in st.session_state:
     st.session_state["save_pending"] = False
 if "saved_to_sheet" not in st.session_state:
@@ -212,6 +326,10 @@ if st.session_state.get("force_reload"):
     st.session_state["force_reload"] = False
     components.html("<script>window.parent.location.reload();</script>", height=0)
     st.stop()
+
+if st.session_state.get("mode_switch_pending"):
+    st.session_state["mode_switch_pending"] = False
+    st.rerun()
 
 def reset_evaluacion() -> None:
     # Clear widget state while keeping base keys we re-init below.
@@ -233,20 +351,73 @@ def reset_evaluacion() -> None:
 def trigger_save_to_sheet() -> None:
     st.session_state["save_pending"] = True
 
+
+def _clear_mode_sensitive_widget_state() -> None:
+    """Clear widget keys so PRE/POST labels/branches re-render consistently after mode switch."""
+    keep = {
+        "answers",
+        "survey_mode",
+        "survey_mode_global",
+        "mode_switch_pending",
+        "save_pending",
+        "saved_to_sheet",
+        "force_reload",
+    }
+    keys_to_drop = [k for k in st.session_state.keys() if k not in keep]
+    for key in keys_to_drop:
+        st.session_state.pop(key, None)
+
+
+def on_survey_mode_change() -> None:
+    new_mode = st.session_state.get("survey_mode_global", "POST")
+    old_mode = st.session_state.get("survey_mode", "POST")
+    if new_mode == old_mode:
+        return
+    st.session_state["survey_mode"] = new_mode
+    _clear_mode_sensitive_widget_state()
+    st.session_state["mode_switch_pending"] = True
+
+
+def get_survey_mode() -> str:
+    mode = st.session_state.get("survey_mode", "POST")
+    return "PRE" if mode == "PRE" else "POST"
+
+
+def map_answer_key(key: str) -> str:
+    """Map logical A-keys to storage keys based on active survey mode."""
+    if get_survey_mode() != "PRE":
+        return key
+    if key == "a41_before":
+        return "b41_baseline"
+    if key.startswith("a"):
+        return "b" + key[1:]
+    if key.startswith("A"):
+        return "B" + key[1:]
+    return key
+
+
+def map_label_code(code: str) -> str:
+    """Map indicator label codes (A1.1 -> B1.1) for PRE mode displays/exports."""
+    if get_survey_mode() != "PRE":
+        return code
+    if code.startswith("A"):
+        return "B" + code[1:]
+    return code
+
 def get_ans(key, default=None):
-    return st.session_state["answers"].get(key, default)
+    return st.session_state["answers"].get(map_answer_key(key), default)
 
 def set_ans(key, value):
-    st.session_state["answers"][key] = value
+    st.session_state["answers"][map_answer_key(key)] = value
 
 def _ui_key(base: str) -> str:
     # Use stable keys per question
-    return base
+    return map_answer_key(base)
 
 def _clear_answer(*answer_keys: str) -> None:
     """Clear stored answers (logical values)."""
     for k in answer_keys:
-        st.session_state["answers"].pop(k, None)
+        st.session_state["answers"].pop(map_answer_key(k), None)
 
 def _clear_widget_state(*base_keys: str) -> None:
     """Clear Streamlit widget state for keys that were built with _ui_key(base)."""
@@ -271,9 +442,9 @@ def to_float_or_none(x):
         return None
 
 # Helpers de widgets (radio, checkbox, slider, etc.)
-def radio_answer(key, label, options, labels_map):
+def radio_answer(key, label, options, labels_map, allow_unanswered=False):
     prev = get_ans(key)
-    idx = options.index(prev) if prev in options else 0
+    idx = options.index(prev) if prev in options else (None if allow_unanswered else 0)
     ui_key = _ui_key(key)
     val = st.radio(label, options, index=idx, format_func=lambda x: labels_map[x], key=ui_key)
     set_ans(key, val)
@@ -1642,6 +1813,16 @@ def score_A1_2_2(a12_1, a12_2_1, a12_2_2):
 
 
 def score_A1_2_3(a12_3):
+    if get_survey_mode() == "PRE":
+        if a12_3 == 1:
+            return 100.0
+        elif a12_3 == 2:
+            return 50.0
+        elif a12_3 == 3:
+            return 10.0
+        elif a12_3 == 4:
+            return 5.0
+        return None
     if a12_3 == 1:
         return 100.0
     elif a12_3 == 2:
@@ -1696,7 +1877,8 @@ def calc_A1_5(a12_3, a15_1, a15_2):
         return S51
     if S52 is None or S23 is None:
         return None
-    return 0.5 * S52 + S23
+    # Weighted average must stay on 0-100 scale.
+    return max(0.0, min(100.0, 0.5 * S52 + 0.5 * S23))
 
 
 def calc_intangibles_A1(A1_1, A1_2, A1_3, A1_4, A1_5):
@@ -1755,12 +1937,22 @@ def calc_A2_1(a_walk, a_bike, a_pt, a_car, a21_2):
 def calc_A2_2(a22_1, a22_2, a22_3):
     S221 = score_1_3_100_50_10(a22_1)
     S222 = score_1_3_10_50_100(a22_2) if a22_2 is not None else None
-    if a22_3 == 1:
-        S223 = 100.0
-    elif a22_3 == 2:
-        S223 = 50.0
+    if get_survey_mode() == "PRE":
+        if a22_3 == 1:
+            S223 = 100.0
+        elif a22_3 == 2:
+            S223 = 50.0
+        elif a22_3 == 3:
+            S223 = 10.0
+        else:
+            S223 = None
     else:
-        S223 = None
+        if a22_3 == 1:
+            S223 = 100.0
+        elif a22_3 == 2:
+            S223 = 50.0
+        else:
+            S223 = None
 
     S221 = nz(S221)
     S222 = nz(S222)
@@ -1854,11 +2046,23 @@ def calc_A3_1(a31_1, a14_1):
 
 
 def calc_A3_2(a32_1, a32_2, a14_1, A0_3):
-    S321 = score_1_3_100_50_10(a32_1)
-    if A0_3 == 1:
+    if get_survey_mode() == "PRE":
+        S321 = score_estado(a32_1)
+    else:
+        S321 = score_1_3_100_50_10(a32_1)
+    if get_survey_mode() == "PRE":
+        S322 = score_estado(a32_2)
+    else:
         S322 = score_1_3_100_50_10(a32_2)
-        if S321 is None or S322 is None:
+
+    if A0_3 == 1:
+        # Accept either source when one branch does not capture both fields.
+        if S321 is None and S322 is None:
             return None
+        if S321 is None:
+            return S322
+        if S322 is None:
+            return S321
         return 0.55 * S321 + 0.45 * S322
     else:
         return score_estado(a14_1)
@@ -1915,6 +2119,9 @@ def calc_intangibles_A3(A3_1, A3_2, A3_3, A3_4, A3_5, A3_6, A3_7):
 # 6. CÁLCULO DE INDICADORES E INTANGIBLES A4
 # =========================================================
 def calc_A4_1(a41_1, a41_before, a41_after, a41_2):
+    if get_survey_mode() == "PRE":
+        # PRE baseline does not compare before/after; use perceptual proxy.
+        return score_1_3_100_50_10(a41_2)
     if a41_1 == 1:
         b = a41_before
         a = a41_after
@@ -1976,6 +2183,10 @@ def calc_A4_3(a43_1, a43_2):
 
 
 def score_A4_4_1(x):
+    if get_survey_mode() == "PRE":
+        if x is None:
+            return None
+        return float(max(0, min(10, x))) * 10.0
     return score_1_3_100_50_10(x)
 
 
@@ -2087,6 +2298,1078 @@ def format_score_with_na(value: float | None) -> str:
     return f"{value:.1f}"
 
 
+def classify_impact_level(delta_global: float | None) -> str:
+    if delta_global is None:
+        return "Sin datos"
+    if delta_global >= 20:
+        return "Transformador"
+    if delta_global >= 10:
+        return "Significativo"
+    if delta_global >= 5:
+        return "Moderado"
+    if delta_global > -5:
+        return "Minimo"
+    return "Negativo"
+
+
+def classify_indicator_change(pre_val: float | None, post_val: float | None) -> str:
+    if pre_val is None or post_val is None:
+        return "Sin datos"
+    delta = post_val - pre_val
+    avg_val = (pre_val + post_val) / 2
+    if delta >= 15 and post_val >= 75:
+        return "Logro Consolidado"
+    if delta >= 10:
+        return "Fortaleza"
+    if abs(delta) <= 5 and avg_val < 60:
+        return "Oportunidad"
+    if delta < -5:
+        return "Foco de Atencion"
+    return "Mejora Moderada"
+
+
+def classify_attribute_change(pre_val: float | None, post_val: float | None) -> str:
+    if pre_val is None or post_val is None:
+        return "Sin datos"
+    delta = post_val - pre_val
+    if delta >= 15 and post_val >= 75:
+        return "Logro Consolidado"
+    if delta >= 15:
+        return "Fortaleza"
+    if delta < -5:
+        return "Foco de Atencion"
+    if -5 < delta < 5 and ((pre_val + post_val) / 2) < 60:
+        return "Oportunidad"
+    return "Mejora Moderada"
+
+
+def create_impact_gauge(pre_global: float, post_global: float, delta_global: float):
+    level_colors = {
+        "Transformador": "#2E7D32",
+        "Significativo": "#558B2F",
+        "Moderado": "#F57C00",
+        "Minimo": "#EF6C00",
+        "Negativo": "#C62828",
+        "Sin datos": "#6B7280",
+    }
+    level = classify_impact_level(delta_global)
+    color = level_colors.get(level, "#6B7280")
+
+    if PLOTLY_AVAILABLE and px is not None:
+        import plotly.graph_objects as go
+
+        fig = go.Figure(
+            go.Indicator(
+                mode="gauge+number+delta",
+                value=float(post_global),
+                delta={"reference": float(pre_global), "relative": False, "position": "top"},
+                title={"text": f"Impacto global: {level}"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": color},
+                    "steps": [
+                        {"range": [0, 40], "color": "#FDECEC"},
+                        {"range": [40, 60], "color": "#FFF4E5"},
+                        {"range": [60, 80], "color": "#F1F8E9"},
+                        {"range": [80, 100], "color": "#EAF7EC"},
+                    ],
+                },
+            )
+        )
+        fig.update_layout(height=310, margin=dict(l=20, r=20, t=50, b=20))
+        return fig
+
+    fig, ax = plt.subplots(figsize=(8.5, 1.8), dpi=110)
+    ax.barh([0], [post_global], color=color, alpha=0.9)
+    ax.barh([0], [pre_global], color="#94A3B8", alpha=0.35)
+    ax.set_xlim(0, 100)
+    ax.set_yticks([])
+    ax.set_title(f"Impacto global: {level} | PRE {pre_global:.1f} -> POST {post_global:.1f} (Delta {delta_global:+.1f})")
+    return fig
+
+
+def create_comparative_bar_chart(pre_totals: dict, post_totals: dict):
+    attrs = ["Encuentro", "Conexiones y Accesos", "Comodidad e Imagen", "Usos y Actividades"]
+    keys = ["A1_total", "A2_total", "A3_total", "A4_total"]
+    pre_vals = [float(pre_totals.get(k, 0.0) or 0.0) for k in keys]
+    post_vals = [float(post_totals.get(k, 0.0) or 0.0) for k in keys]
+    deltas = [post - pre for pre, post in zip(pre_vals, post_vals)]
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=110)
+    x = np.arange(len(attrs))
+    width = 0.36
+    pre_colors = ["#9EA2C6", "#7297C2", "#BFCA73", "#E79A90"]
+    post_colors = ["#575A99", "#275A9F", "#A5BB39", "#E45B48"]
+
+    ax.bar(x - width / 2, pre_vals, width, label="PRE", color=pre_colors, alpha=0.7)
+    ax.bar(x + width / 2, post_vals, width, label="POST", color=post_colors)
+
+    for i, (d, p, q) in enumerate(zip(deltas, pre_vals, post_vals)):
+        y = max(p, q) + 2.5
+        c = "#2E7D32" if d >= 10 else "#EF6C00" if d >= 0 else "#C62828"
+        ax.text(i, y, f"{d:+.1f}", ha="center", va="bottom", fontsize=10, fontweight="bold", color=c)
+
+    ax.set_ylim(0, 110)
+    ax.set_xticks(x)
+    ax.set_xticklabels(attrs)
+    ax.set_ylabel("Puntaje (0-100)")
+    ax.set_title("Comparacion PRE vs POST por atributo")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    return fig
+
+
+def create_attributes_delta_table(pre_totals: dict, post_totals: dict) -> pd.DataFrame:
+    rows = []
+    mapping = [
+        ("A1_total", "Encuentro"),
+        ("A2_total", "Conexiones y Accesos"),
+        ("A3_total", "Comodidad e Imagen"),
+        ("A4_total", "Usos y Actividades"),
+    ]
+    for key, label in mapping:
+        pre_val = pre_totals.get(key)
+        post_val = post_totals.get(key)
+        delta = None if pre_val is None or post_val is None else float(post_val) - float(pre_val)
+        rows.append(
+            {
+                "Atributo": label,
+                "PRE": None if pre_val is None else round(float(pre_val), 1),
+                "POST": None if post_val is None else round(float(post_val), 1),
+                "Delta": None if delta is None else round(delta, 1),
+                "Clasificacion": classify_attribute_change(pre_val, post_val),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def create_indicators_delta_table_with_classification(pre_indicators: dict, post_indicators: dict) -> pd.DataFrame:
+    rows = []
+    indicator_order = {
+        "A1": ["A1.1", "A1.2", "A1.3", "A1.4", "A1.5"],
+        "A2": ["A2.1", "A2.2", "A2.3", "A2.4", "A2.5", "A2.6"],
+        "A3": ["A3.1", "A3.2", "A3.3", "A3.4", "A3.5", "A3.6", "A3.7"],
+        "A4": ["A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6"],
+    }
+    for attr, codes in indicator_order.items():
+        for code in codes:
+            pre_val = pre_indicators.get(attr, {}).get(code)
+            post_val = post_indicators.get(attr, {}).get(code)
+            delta = None if pre_val is None or post_val is None else float(post_val) - float(pre_val)
+            rows.append(
+                {
+                    "Atributo": attr,
+                    "Indicador": code,
+                    "PRE": None if pre_val is None else round(float(pre_val), 1),
+                    "POST": None if post_val is None else round(float(post_val), 1),
+                    "Delta": None if delta is None else round(delta, 1),
+                    "Clasificacion": classify_indicator_change(pre_val, post_val),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def create_overlaid_indicators_chart(pre_indicators: dict, post_indicators: dict):
+    rows = []
+    for attr in ["A1", "A2", "A3", "A4"]:
+        for code, pre_v in pre_indicators.get(attr, {}).items():
+            post_v = post_indicators.get(attr, {}).get(code)
+            delta = None if pre_v is None or post_v is None else float(post_v) - float(pre_v)
+            rows.append({"Indicador": code, "Momento": "PRE", "Valor": pre_v, "Atributo": attr, "Delta": delta})
+            rows.append({"Indicador": code, "Momento": "POST", "Valor": post_v, "Atributo": attr, "Delta": delta})
+    df = pd.DataFrame(rows)
+    df = df[df["Valor"].notna()]
+    if df.empty:
+        return None
+
+    if PLOTLY_AVAILABLE and px is not None:
+        color_map = {"A1": "#575A99", "A2": "#275A9F", "A3": "#A5BB39", "A4": "#E45B48"}
+        fig = px.line(
+            df,
+            x="Indicador",
+            y="Valor",
+            color="Atributo",
+            line_dash="Momento",
+            markers=True,
+            color_discrete_map=color_map,
+            hover_data={"Momento": True, "Delta": ":.1f"},
+            title="Evolucion de indicadores PRE vs POST",
+        )
+        fig.update_layout(height=430, yaxis_range=[0, 100], xaxis_title=None, yaxis_title="Puntaje")
+        return fig
+
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=110)
+    for moment, ls in [("PRE", "--"), ("POST", "-")]:
+        df_m = df[df["Momento"] == moment]
+        ax.plot(df_m["Indicador"], df_m["Valor"], linestyle=ls, marker="o", alpha=0.9, label=moment)
+    ax.set_ylim(0, 100)
+    ax.set_title("Evolucion de indicadores PRE vs POST")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    return fig
+
+
+def calculate_all_intangibles_from_bundle(bundle: dict) -> dict:
+    inds = bundle.get("indicators", {})
+    a1 = inds.get("A1", {})
+    a2 = inds.get("A2", {})
+    a3 = inds.get("A3", {})
+    a4 = inds.get("A4", {})
+
+    int_a1 = calc_intangibles_A1(a1.get("A1.1"), a1.get("A1.2"), a1.get("A1.3"), a1.get("A1.4"), a1.get("A1.5"))
+    int_a2 = calc_intangibles_A2(a2.get("A2.1"), a2.get("A2.2"), a2.get("A2.3"), a2.get("A2.4"), a2.get("A2.5"), a2.get("A2.6"), a3.get("A3.4"))
+    int_a3 = calc_intangibles_A3(a3.get("A3.1"), a3.get("A3.2"), a3.get("A3.3"), a3.get("A3.4"), a3.get("A3.5"), a3.get("A3.6"), a3.get("A3.7"))
+    int_a4 = calc_intangibles_A4(
+        a4.get("A4.1"),
+        a4.get("A4.2"),
+        a4.get("A4.3"),
+        a4.get("A4.4"),
+        a4.get("A4.5"),
+        a4.get("A4.6"),
+        a1.get("A1.2"),
+        a1.get("A1.3"),
+        a3.get("A3.6"),
+        int_a3.get("Agradable"),
+    )
+    return {
+        "Encuentro": int_a1,
+        "Conexiones y Accesos": int_a2,
+        "Comodidad e Imagen": int_a3,
+        "Usos y Actividades": int_a4,
+    }
+
+
+def create_intangibles_delta_table(intangibles_pre: dict, intangibles_post: dict) -> pd.DataFrame:
+    rows = []
+    for attr in ["Encuentro", "Conexiones y Accesos", "Comodidad e Imagen", "Usos y Actividades"]:
+        pre_dict = intangibles_pre.get(attr, {})
+        post_dict = intangibles_post.get(attr, {})
+        for name, pre_v in pre_dict.items():
+            post_v = post_dict.get(name)
+            if pre_v is None or post_v is None:
+                continue
+            delta = float(post_v) - float(pre_v)
+            rows.append(
+                {
+                    "Atributo": attr,
+                    "Intangible": name,
+                    "PRE": round(float(pre_v), 1),
+                    "POST": round(float(post_v), 1),
+                    "Delta": round(delta, 1),
+                    "Clasificacion": classify_indicator_change(float(pre_v), float(post_v)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def create_intangibles_scatter_plot(intangibles_pre: dict, intangibles_post: dict):
+    df_int = create_intangibles_delta_table(intangibles_pre, intangibles_post)
+    if df_int.empty:
+        return None
+    df_int = df_int.sort_values("Delta", ascending=False).reset_index(drop=True)
+    if PLOTLY_AVAILABLE and px is not None:
+        fig = px.scatter(
+            df_int,
+            x="Intangible",
+            y="Delta",
+            color="Atributo",
+            size=df_int["Delta"].abs() + 1,
+            hover_data=["PRE", "POST", "Clasificacion"],
+            title="Cambio de intangibles (POST - PRE)",
+        )
+        fig.add_hline(y=0, line_dash="dot")
+        fig.update_layout(height=430, xaxis_title=None, yaxis_title="Delta")
+        return fig
+
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=110)
+    ax.axhline(0, color="#9CA3AF", linestyle="--", linewidth=1)
+    ax.scatter(df_int["Intangible"], df_int["Delta"], c="#275A9F", alpha=0.8)
+    ax.set_title("Cambio de intangibles (POST - PRE)")
+    ax.set_ylabel("Delta")
+    return fig
+
+
+def render_intangibles_classification_panels(intangibles_pre: dict, intangibles_post: dict) -> None:
+    df_int = create_intangibles_delta_table(intangibles_pre, intangibles_post)
+    if df_int.empty:
+        st.info("No hay datos suficientes para clasificar intangibles.")
+        return
+
+    def _bucket(row):
+        pre_v, post_v, delta = row["PRE"], row["POST"], row["Delta"]
+        avg_v = (pre_v + post_v) / 2
+        if delta >= 15 and post_v >= 75:
+            return "Logros Consolidados"
+        if delta >= 10:
+            return "Fortalezas"
+        if abs(delta) <= 5 and avg_v < 60:
+            return "Oportunidades"
+        if delta < -5:
+            return "Focos de Atencion"
+        return "Mejora Moderada"
+
+    df_int["Panel"] = df_int.apply(_bucket, axis=1)
+
+    panel_cfg = [
+        ("Logros Consolidados", "#EAF7EC", "#2E7D32"),
+        ("Fortalezas", "#F1F8E9", "#558B2F"),
+        ("Oportunidades", "#FFF4E5", "#EF6C00"),
+        ("Focos de Atencion", "#FDECEC", "#C62828"),
+    ]
+    cols = st.columns(4)
+    for col, (name, bg, fg) in zip(cols, panel_cfg):
+        with col:
+            st.markdown(f"**{name}**")
+            items = df_int[df_int["Panel"] == name].sort_values("Delta", ascending=False).head(5)
+            if items.empty:
+                st.markdown(f"<div style='background:{bg};color:{fg};padding:0.65rem;border-radius:0.5rem;'>Sin elementos</div>", unsafe_allow_html=True)
+            else:
+                rows = "".join([f"<div>• {r.Intangible} ({r.Delta:+.1f})</div>" for r in items.itertuples()])
+                st.markdown(f"<div style='background:{bg};color:{fg};padding:0.65rem;border-radius:0.5rem;'>{rows}</div>", unsafe_allow_html=True)
+
+
+def generate_impact_narrative(delta: float, pre: float, post: float) -> str:
+    lvl = classify_impact_level(delta)
+    pct = (delta / pre) * 100.0 if pre > 0 else 0.0
+    return (
+        f"La intervencion genero un impacto **{lvl}**, con un cambio global de **{delta:+.1f} puntos** "
+        f"({pct:+.1f}%). El lugar paso de **{pre:.1f}** en PRE a **{post:.1f}** en POST."
+    )
+
+
+def generate_attributes_comparative_narrative(df_attrs_delta: pd.DataFrame) -> str:
+    if df_attrs_delta.empty:
+        return "No hay datos para interpretar atributos."
+    top_gain = df_attrs_delta.sort_values("Delta", ascending=False).iloc[0]
+    top_drop = df_attrs_delta.sort_values("Delta", ascending=True).iloc[0]
+    return (
+        f"La mayor ganancia se observa en **{top_gain['Atributo']}** ({top_gain['Delta']:+.1f}), "
+        f"mientras que el principal foco de atencion es **{top_drop['Atributo']}** ({top_drop['Delta']:+.1f})."
+    )
+
+
+def generate_indicators_comparative_narrative(df_ind_delta: pd.DataFrame) -> str:
+    if df_ind_delta.empty:
+        return "No hay datos para interpretar indicadores."
+    gains = df_ind_delta.sort_values("Delta", ascending=False).head(3)
+    drops = df_ind_delta.sort_values("Delta", ascending=True).head(3)
+    gains_txt = ", ".join([f"{r.Indicador} ({r.Delta:+.1f})" for r in gains.itertuples()])
+    drops_txt = ", ".join([f"{r.Indicador} ({r.Delta:+.1f})" for r in drops.itertuples()])
+    return f"Principales avances: {gains_txt}. Focos de atencion: {drops_txt}."
+
+
+def generate_intangibles_comparative_narrative(df_int_delta: pd.DataFrame) -> str:
+    if df_int_delta.empty:
+        return "No hay datos para interpretar intangibles."
+    strong = df_int_delta[df_int_delta["Clasificacion"].isin(["Logro Consolidado", "Fortaleza"])].head(5)
+    risk = df_int_delta[df_int_delta["Clasificacion"] == "Foco de Atencion"].head(5)
+    strong_txt = ", ".join(strong["Intangible"].tolist()) if not strong.empty else "sin elementos destacados"
+    risk_txt = ", ".join(risk["Intangible"].tolist()) if not risk.empty else "sin retrocesos relevantes"
+    return f"En intangibles, destacan: {strong_txt}. Requieren atencion: {risk_txt}."
+
+
+def generate_comparative_recommendations(df_ind_delta: pd.DataFrame, df_int_delta: pd.DataFrame) -> dict:
+    recs = {
+        "Consolidar logros": [],
+        "Atender focos de deterioro": [],
+        "Activar oportunidades latentes": [],
+        "Mantener nivel alcanzado": [],
+    }
+
+    top_gains = df_ind_delta.sort_values("Delta", ascending=False).head(3)
+    for r in top_gains.itertuples():
+        recs["Consolidar logros"].append(f"Documentar y replicar la estrategia asociada a {r.Indicador} ({r.Delta:+.1f}).")
+
+    drops = df_ind_delta[df_ind_delta["Delta"] < -5].sort_values("Delta", ascending=True).head(3)
+    for r in drops.itertuples():
+        recs["Atender focos de deterioro"].append(f"Diseñar accion correctiva para {r.Indicador} ({r.Delta:+.1f}) con seguimiento mensual.")
+
+    opps = df_ind_delta[(df_ind_delta["Delta"].abs() <= 5) & (df_ind_delta[["PRE", "POST"]].mean(axis=1) < 60)].head(3)
+    for r in opps.itertuples():
+        recs["Activar oportunidades latentes"].append(f"Pilotear intervencion focalizada en {r.Indicador} para romper estancamiento.")
+
+    high_int = df_int_delta[(df_int_delta["POST"] >= 75) & (df_int_delta["Delta"] >= 10)].head(3)
+    for r in high_int.itertuples():
+        recs["Mantener nivel alcanzado"].append(f"Establecer rutina de mantenimiento comunitario en {r.Intangible}.")
+
+    for k in recs:
+        if not recs[k]:
+            recs[k] = ["Sin hallazgos suficientes con los datos actuales."]
+    return recs
+
+
+def build_comparative_export_dataframe(
+    df_attrs: pd.DataFrame,
+    df_ind: pd.DataFrame,
+    df_int: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build a single CSV-friendly dataframe with all comparative blocks."""
+    frames = []
+
+    if df_attrs is not None and not df_attrs.empty:
+        dfa = df_attrs.copy()
+        dfa.insert(0, "Bloque", "Atributos")
+        dfa.insert(1, "Elemento", dfa["Atributo"])
+        frames.append(dfa)
+
+    if df_ind is not None and not df_ind.empty:
+        dfi = df_ind.copy()
+        dfi.insert(0, "Bloque", "Indicadores")
+        dfi.insert(1, "Elemento", dfi["Indicador"])
+        frames.append(dfi)
+
+    if df_int is not None and not df_int.empty:
+        dft = df_int.copy()
+        dft.insert(0, "Bloque", "Intangibles")
+        dft.insert(1, "Elemento", dft["Intangible"])
+        frames.append(dft)
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True, sort=False)
+
+    def _priority_from_row(row) -> str:
+        clas = str(row.get("Clasificacion", "")).strip()
+        delta = row.get("Delta")
+        try:
+            delta_num = float(delta)
+        except (TypeError, ValueError):
+            delta_num = None
+
+        if clas in {"Foco de Atencion"}:
+            return "Alta"
+        if clas in {"Oportunidad"}:
+            return "Media"
+        if clas in {"Logro Consolidado", "Fortaleza"}:
+            return "Baja"
+        if delta_num is None:
+            return "Media"
+        if delta_num <= -5:
+            return "Alta"
+        if -5 < delta_num < 5:
+            return "Media"
+        return "Baja"
+
+    out["Prioridad"] = out.apply(_priority_from_row, axis=1)
+    return out
+
+
+def render_comparative_analysis(pre_bundle: dict, post_bundle: dict) -> None:
+    st.markdown("---")
+    st.markdown('<div id="analisis_comparativo"></div>', unsafe_allow_html=True)
+    st.header("Analisis Comparativo PRE-POST")
+
+    pre_global = float(pre_bundle.get("global_score", 0.0) or 0.0)
+    post_global = float(post_bundle.get("global_score", 0.0) or 0.0)
+    delta_global = post_global - pre_global
+
+    st.subheader("Impacto Global de la Intervencion")
+    gauge = create_impact_gauge(pre_global, post_global, delta_global)
+    if PLOTLY_AVAILABLE and px is not None and hasattr(gauge, "to_dict"):
+        st.plotly_chart(gauge, use_container_width=True)
+    else:
+        st.pyplot(gauge, use_container_width=True)
+    st.write(generate_impact_narrative(delta_global, pre_global, post_global))
+
+    st.markdown("---")
+    st.subheader("Comparacion por Atributos")
+    fig_attrs = create_comparative_bar_chart(pre_bundle.get("totals", {}), post_bundle.get("totals", {}))
+    st.pyplot(fig_attrs, use_container_width=True)
+    df_attrs = create_attributes_delta_table(pre_bundle.get("totals", {}), post_bundle.get("totals", {}))
+    st.dataframe(df_attrs, use_container_width=True, hide_index=True)
+    st.write(generate_attributes_comparative_narrative(df_attrs))
+
+    st.markdown("---")
+    st.subheader("Evolucion de Indicadores")
+    fig_ind = create_overlaid_indicators_chart(pre_bundle.get("indicators", {}), post_bundle.get("indicators", {}))
+    if fig_ind is not None:
+        if PLOTLY_AVAILABLE and px is not None and hasattr(fig_ind, "to_dict"):
+            st.plotly_chart(fig_ind, use_container_width=True)
+        else:
+            st.pyplot(fig_ind, use_container_width=True)
+    df_ind = create_indicators_delta_table_with_classification(pre_bundle.get("indicators", {}), post_bundle.get("indicators", {}))
+    st.dataframe(df_ind, use_container_width=True, hide_index=True)
+    st.write(generate_indicators_comparative_narrative(df_ind))
+
+    st.markdown("---")
+    st.subheader("Transformacion de Cualidades Intangibles")
+    int_pre = calculate_all_intangibles_from_bundle(pre_bundle)
+    int_post = calculate_all_intangibles_from_bundle(post_bundle)
+    fig_int = create_intangibles_scatter_plot(int_pre, int_post)
+    if fig_int is not None:
+        if PLOTLY_AVAILABLE and px is not None and hasattr(fig_int, "to_dict"):
+            st.plotly_chart(fig_int, use_container_width=True)
+        else:
+            st.pyplot(fig_int, use_container_width=True)
+    render_intangibles_classification_panels(int_pre, int_post)
+    df_int = create_intangibles_delta_table(int_pre, int_post)
+    st.dataframe(df_int, use_container_width=True, hide_index=True)
+    st.write(generate_intangibles_comparative_narrative(df_int))
+
+    st.markdown("---")
+    st.subheader("Recomendaciones Basadas en el Analisis Comparativo")
+    recs = generate_comparative_recommendations(df_ind, df_int)
+    for category, items in recs.items():
+        st.markdown(f"**{category}**")
+        for item in items:
+            st.write(f"- {item}")
+
+    st.markdown("---")
+    st.subheader("Descargar informe comparativo")
+    export_df = build_comparative_export_dataframe(df_attrs, df_ind, df_int)
+    if export_df.empty:
+        st.info("No hay datos suficientes para exportar el comparativo.")
+    else:
+        export_name_base = (st.session_state.get("answers", {}).get(map_answer_key("nombre_lugar"), "lugar") or "lugar").replace(" ", "_")
+        export_bytes = export_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Descargar comparativo PRE-POST en CSV",
+            data=export_bytes,
+            file_name=f"comparativo_pre_post_{export_name_base}.csv",
+            mime="text/csv",
+            key="btn_download_comparative_csv",
+        )
+
+
+def _row_float_or_none_local(row, col_name):
+    if col_name not in row.index:
+        return None
+    val = row[col_name]
+    if pd.isna(val):
+        return None
+    parsed = to_float_or_none(val)
+    if parsed is None:
+        return None
+    if isinstance(parsed, float) and not np.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _bundle_from_row(row, prefix: str, fallback_program: str) -> dict:
+    indicators = {
+        "A1": {
+            "A1.1": _row_float_or_none_local(row, f"{prefix}1.1"),
+            "A1.2": _row_float_or_none_local(row, f"{prefix}1.2"),
+            "A1.3": _row_float_or_none_local(row, f"{prefix}1.3"),
+            "A1.4": _row_float_or_none_local(row, f"{prefix}1.4"),
+            "A1.5": _row_float_or_none_local(row, f"{prefix}1.5"),
+        },
+        "A2": {
+            "A2.1": _row_float_or_none_local(row, f"{prefix}2.1"),
+            "A2.2": _row_float_or_none_local(row, f"{prefix}2.2"),
+            "A2.3": _row_float_or_none_local(row, f"{prefix}2.3"),
+            "A2.4": _row_float_or_none_local(row, f"{prefix}2.4"),
+            "A2.5": _row_float_or_none_local(row, f"{prefix}2.5"),
+            "A2.6": _row_float_or_none_local(row, f"{prefix}2.6"),
+        },
+        "A3": {
+            "A3.1": _row_float_or_none_local(row, f"{prefix}3.1"),
+            "A3.2": _row_float_or_none_local(row, f"{prefix}3.2"),
+            "A3.3": _row_float_or_none_local(row, f"{prefix}3.3"),
+            "A3.4": _row_float_or_none_local(row, f"{prefix}3.4"),
+            "A3.5": _row_float_or_none_local(row, f"{prefix}3.5"),
+            "A3.6": _row_float_or_none_local(row, f"{prefix}3.6"),
+            "A3.7": _row_float_or_none_local(row, f"{prefix}3.7"),
+        },
+        "A4": {
+            "A4.1": _row_float_or_none_local(row, f"{prefix}4.1"),
+            "A4.2": _row_float_or_none_local(row, f"{prefix}4.2"),
+            "A4.3": _row_float_or_none_local(row, f"{prefix}4.3"),
+            "A4.4": _row_float_or_none_local(row, f"{prefix}4.4"),
+            "A4.5": _row_float_or_none_local(row, f"{prefix}4.5"),
+            "A4.6": _row_float_or_none_local(row, f"{prefix}4.6"),
+        },
+    }
+    row_program_id = str(row.get("programa", fallback_program) or fallback_program)
+    totals = {
+        "A1_total": _row_float_or_none_local(row, f"{prefix}1_total"),
+        "A2_total": _row_float_or_none_local(row, f"{prefix}2_total"),
+        "A3_total": _row_float_or_none_local(row, f"{prefix}3_total"),
+        "A4_total": _row_float_or_none_local(row, f"{prefix}4_total"),
+    }
+    if totals["A1_total"] is None:
+        totals["A1_total"] = compute_attribute_total(row_program_id, "A1", indicators["A1"])
+    if totals["A2_total"] is None:
+        totals["A2_total"] = compute_attribute_total(row_program_id, "A2", indicators["A2"])
+    if totals["A3_total"] is None:
+        totals["A3_total"] = compute_attribute_total(row_program_id, "A3", indicators["A3"])
+    if totals["A4_total"] is None:
+        totals["A4_total"] = compute_attribute_total(row_program_id, "A4", indicators["A4"])
+
+    section_scores_local = compute_section_scores(
+        totals["A1_total"],
+        totals["A2_total"],
+        totals["A3_total"],
+        totals["A4_total"],
+    )
+    row_global = _row_float_or_none_local(row, "global_score")
+    if row_global is None:
+        row_global = compute_global_score(row_program_id, section_scores_local)
+
+    return {
+        "program_id": row_program_id,
+        "indicators": indicators,
+        "totals": totals,
+        "global_score": float(row_global),
+    }
+
+
+def _parse_comparison_row_from_text(pasted_text: str, expected_prefix: str) -> tuple[pd.Series | None, str | None]:
+    raw_text = (pasted_text or "").strip()
+    if not raw_text:
+        return None, None
+
+    required_cols = [
+        f"{expected_prefix}1.1", f"{expected_prefix}1.2", f"{expected_prefix}1.3", f"{expected_prefix}1.4", f"{expected_prefix}1.5",
+        f"{expected_prefix}2.1", f"{expected_prefix}2.2", f"{expected_prefix}2.3", f"{expected_prefix}2.4", f"{expected_prefix}2.5", f"{expected_prefix}2.6",
+        f"{expected_prefix}3.1", f"{expected_prefix}3.2", f"{expected_prefix}3.3", f"{expected_prefix}3.4", f"{expected_prefix}3.5", f"{expected_prefix}3.6", f"{expected_prefix}3.7",
+        f"{expected_prefix}4.1", f"{expected_prefix}4.2", f"{expected_prefix}4.3", f"{expected_prefix}4.4", f"{expected_prefix}4.5", f"{expected_prefix}4.6",
+    ]
+
+    try:
+        if "\n" in raw_text:
+            pasted_df = pd.read_csv(StringIO(raw_text))
+            missing_cols = [c for c in required_cols if c not in pasted_df.columns]
+            if pasted_df.empty:
+                return None, "El texto pegado para comparación está vacío."
+            if missing_cols:
+                return None, (
+                    "El texto pegado no contiene todas las columnas requeridas para comparar. "
+                    f"Faltan: {', '.join(missing_cols)}"
+                )
+            if len(pasted_df) > 1:
+                pasted_row_idx = st.selectbox(
+                    "Selecciona la fila pegada para comparación",
+                    options=list(range(len(pasted_df))),
+                    format_func=lambda i: f"Fila {i + 1}",
+                    key=f"pasted_compare_row_idx_{expected_prefix}",
+                )
+            else:
+                pasted_row_idx = 0
+            return pasted_df.iloc[int(pasted_row_idx)], None
+
+        delimiter_candidates = [",", ";", "\t", "|"]
+        chosen_delimiter = max(delimiter_candidates, key=lambda d: raw_text.count(d))
+        raw_values = next(csv.reader([raw_text], delimiter=chosen_delimiter))
+        values = [v.strip() for v in raw_values]
+        expected_columns = SHEET_COLUMNS if expected_prefix == "A" else SHEET_COLUMNS_PRE
+        expected_len = len(expected_columns)
+        if len(values) != expected_len:
+            return None, (
+                "La fila pegada de comparación no coincide con el número esperado de columnas "
+                f"({len(values)} vs {expected_len})."
+            )
+        return pd.Series({col: values[i] for i, col in enumerate(expected_columns)}), None
+    except Exception as exc:
+        return None, f"No se pudo interpretar el texto pegado para comparación: {exc}"
+
+
+def _detect_row_prefix(row: pd.Series) -> str | None:
+    for prefix in ["A", "B"]:
+        cols = [f"{prefix}1.1", f"{prefix}2.1", f"{prefix}3.1", f"{prefix}4.1"]
+        if any(col in row.index and _row_float_or_none_local(row, col) is not None for col in cols):
+            return prefix
+    return None
+
+
+def generate_cross_location_analysis(bundle_1: dict, bundle_2: dict) -> dict:
+    """Genera análisis comparativo entre lugares diferentes sin lógica de impacto temporal."""
+    totals_1 = bundle_1.get("totals", {})
+    totals_2 = bundle_2.get("totals", {})
+
+    attrs = [
+        ("A1_total", "Encuentro"),
+        ("A2_total", "Conexiones y Accesos"),
+        ("A3_total", "Comodidad e Imagen"),
+        ("A4_total", "Usos y Actividades"),
+    ]
+    attr_rows = []
+    for key, label in attrs:
+        v1 = totals_1.get(key)
+        v2 = totals_2.get(key)
+        if v1 is None or v2 is None:
+            delta = None
+        else:
+            delta = float(v1) - float(v2)
+        attr_rows.append(
+            {
+                "Atributo": label,
+                "Lugar 1": None if v1 is None else round(float(v1), 1),
+                "Lugar 2": None if v2 is None else round(float(v2), 1),
+                "Diferencia (L1-L2)": None if delta is None else round(delta, 1),
+            }
+        )
+    df_attrs = pd.DataFrame(attr_rows)
+
+    int_1 = calculate_all_intangibles_from_bundle(bundle_1)
+    int_2 = calculate_all_intangibles_from_bundle(bundle_2)
+
+    def _flatten_intangibles(intangibles_dict: dict) -> pd.DataFrame:
+        rows = []
+        for attr_name, int_map in intangibles_dict.items():
+            for int_name, int_val in int_map.items():
+                if int_val is None:
+                    continue
+                rows.append(
+                    {
+                        "Atributo": attr_name,
+                        "Intangible": int_name,
+                        "Valor": round(float(int_val), 1),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    df_int_1 = _flatten_intangibles(int_1)
+    df_int_2 = _flatten_intangibles(int_2)
+
+    def _top5(df_int: pd.DataFrame) -> list[str]:
+        if df_int.empty:
+            return []
+        best = df_int.sort_values("Valor", ascending=False).head(5)
+        return [f"{r.Intangible} ({r.Valor:.1f})" for r in best.itertuples()]
+
+    def _bottom5(df_int: pd.DataFrame) -> list[str]:
+        if df_int.empty:
+            return []
+        low = df_int.sort_values("Valor", ascending=True).head(5)
+        return [f"{r.Intangible} ({r.Valor:.1f})" for r in low.itertuples()]
+
+    def _median5(df_int: pd.DataFrame) -> list[str]:
+        if df_int.empty:
+            return []
+        med = float(df_int["Valor"].median())
+        closest = df_int.assign(_d=(df_int["Valor"] - med).abs()).sort_values("_d").head(5)
+        return [f"{r.Intangible} ({r.Valor:.1f})" for r in closest.itertuples()]
+
+    top_1 = _top5(df_int_1)
+    top_2 = _top5(df_int_2)
+    low_1 = _bottom5(df_int_1)
+    low_2 = _bottom5(df_int_2)
+    med_1 = _median5(df_int_1)
+    med_2 = _median5(df_int_2)
+
+    shared_ops = []
+    if not df_int_1.empty and not df_int_2.empty:
+        low_names_1 = set(df_int_1.sort_values("Valor", ascending=True).head(8)["Intangible"].tolist())
+        low_names_2 = set(df_int_2.sort_values("Valor", ascending=True).head(8)["Intangible"].tolist())
+        shared_ops = sorted(low_names_1.intersection(low_names_2))[:5]
+
+    lead_attr_1 = df_attrs.sort_values("Diferencia (L1-L2)", ascending=False).iloc[0]["Atributo"] if not df_attrs.empty else "N/A"
+    lead_attr_2 = df_attrs.sort_values("Diferencia (L1-L2)", ascending=True).iloc[0]["Atributo"] if not df_attrs.empty else "N/A"
+    shared_ops_txt = ", ".join(shared_ops) if shared_ops else "sin oportunidades compartidas claras"
+
+    narrative = (
+        f"Lugar 1 destaca en {lead_attr_1}, mientras que Lugar 2 muestra mayor solidez en {lead_attr_2}. "
+        f"Ambos comparten oportunidades en {shared_ops_txt}."
+    )
+
+    return {
+        "attributes": df_attrs,
+        "top_1": top_1,
+        "top_2": top_2,
+        "median_1": med_1,
+        "median_2": med_2,
+        "bottom_1": low_1,
+        "bottom_2": low_2,
+        "shared_opportunities": shared_ops,
+        "narrative": narrative,
+        "intangibles_1": df_int_1,
+        "intangibles_2": df_int_2,
+    }
+
+
+def render_temporal_comparison():
+    """Comparación PRE/POST del mismo lugar."""
+    current_bundle = st.session_state.get("current_results_bundle")
+    current_meta = st.session_state.get("current_results_meta", {})
+    if not current_bundle:
+        st.info("Primero completa la evaluación para habilitar la comparación temporal.")
+        return
+
+    current_mode = get_survey_mode()
+    counterpart_prefix = "A" if current_mode == "PRE" else "B"
+    counterpart_name = "POST" if current_mode == "PRE" else "PRE"
+    current_place_name = (current_meta.get("nombre_lugar", "") or "").strip()
+
+    st.markdown("### Comparación Temporal (PRE vs POST)")
+    st.write(
+        f"Evaluación actual: **{current_mode}** - {current_place_name or 'Sin nombre'}"
+    )
+    st.metric("Puntaje global actual", f"{float(current_bundle.get('global_score', 0.0)):.1f}")
+
+    source = st.radio(
+        "Cargar evaluación contraparte desde",
+        options=["Google Sheets", "Texto pegado CSV"],
+        horizontal=True,
+        key="temporal_compare_source",
+    )
+
+    compare_row = None
+    parse_error = None
+
+    if source == "Texto pegado CSV":
+        pasted_text = st.text_area(
+            f"Pega aquí los datos {counterpart_name} (CSV con encabezados o una sola fila)",
+            key="temporal_pasted_compare_text",
+            height=120,
+        )
+        compare_row, parse_error = _parse_comparison_row_from_text(pasted_text, counterpart_prefix)
+    else:
+        ok_sheet, msg_sheet, all_rows = fetch_comparison_rows_from_google_sheet(counterpart_prefix)
+        if not ok_sheet:
+            parse_error = msg_sheet
+        else:
+            matching_rows = [
+                row for row in all_rows
+                if str(row.get("nombre_lugar", "")).strip().lower() == current_place_name.lower()
+            ]
+            if not matching_rows:
+                st.info(
+                    f"No se encontraron evaluaciones {counterpart_name} para '{current_place_name or 'este lugar'}'."
+                )
+            else:
+                selected_idx = st.selectbox(
+                    f"Selecciona evaluación {counterpart_name}",
+                    options=list(range(len(matching_rows))),
+                    format_func=lambda i: (
+                        f"{matching_rows[i].get('nombre_lugar', 'Sin nombre')} | "
+                        f"{matching_rows[i].get('programa', 'Sin programa')} | "
+                        f"{matching_rows[i].get('global_score', 'NA')} | "
+                        f"{matching_rows[i].get('_sheet_tab', '')} fila {matching_rows[i].get('_sheet_row', '')}"
+                    ),
+                    key="temporal_sheet_compare_row_idx",
+                )
+                compare_row = pd.Series(matching_rows[int(selected_idx)])
+
+    if parse_error:
+        st.warning(parse_error)
+
+    if compare_row is None:
+        st.info("Selecciona o pega una evaluación contraparte para activar el análisis comparativo.")
+        return
+
+    counterpart_bundle = _bundle_from_row(
+        compare_row,
+        counterpart_prefix,
+        current_bundle.get("program_id", "OTRO"),
+    )
+
+    if current_mode == "POST":
+        pre_bundle = counterpart_bundle
+        post_bundle = current_bundle
+    else:
+        pre_bundle = current_bundle
+        post_bundle = counterpart_bundle
+
+    render_comparative_analysis(pre_bundle, post_bundle)
+
+
+def render_cross_location_comparison():
+    """Comparación entre diferentes lugares/programas."""
+    st.markdown("### Comparación Entre Lugares")
+
+    current_bundle = st.session_state.get("current_results_bundle")
+    current_meta = st.session_state.get("current_results_meta", {})
+
+    ok_a, msg_a, rows_a = fetch_comparison_rows_from_google_sheet("A")
+    ok_b, msg_b, rows_b = fetch_comparison_rows_from_google_sheet("B")
+
+    available_rows = []
+    if ok_a:
+        available_rows.extend(rows_a)
+    if ok_b:
+        available_rows.extend(rows_b)
+
+    if not available_rows:
+        msg = msg_a if not ok_a else msg_b
+        st.warning(msg or "No hay evaluaciones disponibles para comparar desde Google Sheets.")
+        return
+
+    has_current = current_bundle is not None
+    source_options = ["Ambos desde Google Sheets"]
+    if has_current:
+        source_options.insert(0, "Lugar 1 = evaluación actual")
+
+    source_mode = st.radio(
+        "Fuente de comparación",
+        options=source_options,
+        horizontal=True,
+        key="cross_locations_source_mode",
+    )
+
+    def _row_label(i: int) -> str:
+        return (
+            f"{available_rows[i].get('nombre_lugar', 'Sin nombre')} | "
+            f"{available_rows[i].get('programa', 'Sin programa')} | "
+            f"{available_rows[i].get('global_score', 'NA')} | "
+            f"{available_rows[i].get('_sheet_tab', '')} fila {available_rows[i].get('_sheet_row', '')}"
+        )
+
+    if source_mode == "Lugar 1 = evaluación actual":
+        bundle_1 = current_bundle
+        place_1 = current_meta.get("nombre_lugar", "") or "Sin nombre"
+        program_1 = bundle_1.get("program_id", "OTRO")
+        score_1 = float(bundle_1.get("global_score", 0.0) or 0.0)
+
+        st.write(f"Lugar 1 (Actual): **{place_1}**")
+        st.write(f"Puntaje: **{score_1:.1f}** | Programa: **{program_1}**")
+
+        selected_idx = st.selectbox(
+            "Lugar 2 (Seleccionar desde Google Sheets)",
+            options=list(range(len(available_rows))),
+            format_func=_row_label,
+            key="cross_sheet_compare_row_idx",
+        )
+        row_2 = pd.Series(available_rows[int(selected_idx)])
+        row_prefix = _detect_row_prefix(row_2)
+        if row_prefix is None:
+            st.warning("La evaluación seleccionada no tiene columnas válidas para construir la comparación.")
+            return
+        bundle_2 = _bundle_from_row(row_2, row_prefix, str(row_2.get("programa", "OTRO") or "OTRO"))
+        place_2 = str(row_2.get("nombre_lugar", "") or "Sin nombre")
+        score_2 = float(bundle_2.get("global_score", 0.0) or 0.0)
+    else:
+        st.write("Selecciona ambos lugares desde Google Sheets.")
+
+        col_sel_1, col_sel_2 = st.columns(2)
+        with col_sel_1:
+            selected_idx_1 = st.selectbox(
+                "Lugar 1 (Google Sheets)",
+                options=list(range(len(available_rows))),
+                format_func=_row_label,
+                key="cross_sheet_compare_row_1_idx",
+            )
+        with col_sel_2:
+            selected_idx_2 = st.selectbox(
+                "Lugar 2 (Google Sheets)",
+                options=list(range(len(available_rows))),
+                format_func=_row_label,
+                key="cross_sheet_compare_row_2_idx",
+            )
+
+        if int(selected_idx_1) == int(selected_idx_2):
+            st.info("Selecciona dos evaluaciones distintas para comparar entre lugares.")
+            return
+
+        row_1 = pd.Series(available_rows[int(selected_idx_1)])
+        row_2 = pd.Series(available_rows[int(selected_idx_2)])
+
+        row_prefix_1 = _detect_row_prefix(row_1)
+        row_prefix_2 = _detect_row_prefix(row_2)
+        if row_prefix_1 is None or row_prefix_2 is None:
+            st.warning("Una de las evaluaciones seleccionadas no tiene columnas válidas para construir la comparación.")
+            return
+
+        bundle_1 = _bundle_from_row(row_1, row_prefix_1, str(row_1.get("programa", "OTRO") or "OTRO"))
+        bundle_2 = _bundle_from_row(row_2, row_prefix_2, str(row_2.get("programa", "OTRO") or "OTRO"))
+        place_1 = str(row_1.get("nombre_lugar", "") or "Sin nombre")
+        place_2 = str(row_2.get("nombre_lugar", "") or "Sin nombre")
+        score_1 = float(bundle_1.get("global_score", 0.0) or 0.0)
+        score_2 = float(bundle_2.get("global_score", 0.0) or 0.0)
+
+    analysis = generate_cross_location_analysis(bundle_1, bundle_2)
+
+    st.markdown("---")
+    st.subheader("Análisis comparativo simplificado")
+    c1, c2 = st.columns(2)
+    c1.metric(place_1, f"{score_1:.1f}")
+    c2.metric(place_2, f"{score_2:.1f}")
+
+    st.markdown("**Fortalezas**")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        st.write(f"{place_1}")
+        for item in analysis["top_1"]:
+            st.write(f"- {item}")
+    with col_f2:
+        st.write(f"{place_2}")
+        for item in analysis["top_2"]:
+            st.write(f"- {item}")
+
+    st.markdown("**Constantes (zona de mediana)**")
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        for item in analysis["median_1"]:
+            st.write(f"- {item}")
+    with col_m2:
+        for item in analysis["median_2"]:
+            st.write(f"- {item}")
+
+    st.markdown("**Oportunidades**")
+    col_o1, col_o2 = st.columns(2)
+    with col_o1:
+        for item in analysis["bottom_1"]:
+            st.write(f"- {item}")
+    with col_o2:
+        for item in analysis["bottom_2"]:
+            st.write(f"- {item}")
+
+    st.markdown("---")
+    st.subheader("Comparación de atributos")
+    df_attrs = analysis["attributes"]
+    if not df_attrs.empty:
+        if MATPLOTLIB_AVAILABLE and plt is not None:
+            x = np.arange(len(df_attrs))
+            width = 0.36
+            fig, ax = plt.subplots(figsize=(10.5, 4.6), dpi=110)
+            ax.bar(x - width / 2, df_attrs["Lugar 1"], width, label=place_1, color="#275A9F", alpha=0.85)
+            ax.bar(x + width / 2, df_attrs["Lugar 2"], width, label=place_2, color="#E45B48", alpha=0.85)
+            ax.set_xticks(x)
+            ax.set_xticklabels(df_attrs["Atributo"])
+            ax.set_ylim(0, 110)
+            ax.set_ylabel("Puntaje (0-100)")
+            ax.grid(axis="y", alpha=0.25)
+            ax.legend()
+            st.pyplot(fig, use_container_width=True)
+        else:
+            chart_df = df_attrs[["Atributo", "Lugar 1", "Lugar 2"]].set_index("Atributo")
+            st.bar_chart(chart_df)
+        st.dataframe(df_attrs, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Aprendizajes cruzados")
+    st.write(analysis["narrative"])
+
+    if analysis["shared_opportunities"]:
+        st.write(
+            "Oportunidades compartidas: " + ", ".join(analysis["shared_opportunities"])
+        )
+
+    export_attrs = df_attrs.copy()
+    export_attrs.insert(0, "Bloque", "Atributos")
+    export_int_1 = analysis["intangibles_1"].copy()
+    export_int_1.insert(0, "Bloque", f"Intangibles_{place_1}")
+    export_int_2 = analysis["intangibles_2"].copy()
+    export_int_2.insert(0, "Bloque", f"Intangibles_{place_2}")
+    export_df = pd.concat([export_attrs, export_int_1, export_int_2], ignore_index=True, sort=False)
+    export_bytes = export_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Descargar comparativo entre lugares en CSV",
+        data=export_bytes,
+        file_name=f"comparativo_lugares_{place_1.replace(' ', '_')}_vs_{place_2.replace(' ', '_')}.csv",
+        mime="text/csv",
+        key="btn_download_cross_location_csv",
+    )
+
+
+def pagina_comparaciones():
+    """Nueva pestaña dedicada a comparaciones."""
+    st.header("Comparaciones")
+
+    comparison_type = st.radio(
+        "Tipo de comparación",
+        options=["Temporal (PRE vs POST)", "Entre Lugares"],
+        horizontal=True,
+        key="comparison_type_selector",
+    )
+
+    if comparison_type == "Temporal (PRE vs POST)":
+        render_temporal_comparison()
+    else:
+        render_cross_location_comparison()
+
+
 # =========================================================
 # 8. PÁGINAS (PASO A PASO)
 # =========================================================
@@ -2144,6 +3427,7 @@ def pagina_antes():
 
     st.markdown('<div id="header_antes"></div>', unsafe_allow_html=True)
     st.header("Antes de empezar")
+    is_pre = get_survey_mode() == "PRE"
 
     # ===========================
     # A0.0.1 - Programa a evaluar
@@ -2159,7 +3443,7 @@ def pagina_antes():
                 break
 
     selected_program_label = st.selectbox(
-        "¿Qué programa quieres evaluar?",
+        "¿Qué programa vas a implementar?" if is_pre else "¿Qué programa quieres evaluar?",
         list(PROGRAM_LABELS.keys()),
         index=list(PROGRAM_LABELS.keys()).index(current_label or default_label),
         key="a001_program_label",
@@ -2311,21 +3595,24 @@ def pagina_antes():
             2: "Hombre",
             3: "Otro / Prefiero no decir",
         },
+        allow_unanswered=True,
     )
 
     # Equipo responsable
     radio_answer(
         "A0_3",
-        "¿Eres el enlace del lugar?",
+        "¿Eres el enlace del lugar o conoces bien su situación actual?" if is_pre else "¿Eres el enlace del lugar?",
         options=[1, 2],
         labels_map={
             1: "Sí",
             2: "No",
         },
+        allow_unanswered=True,
     )
 
 
 def pagina_A1():
+    is_pre = get_survey_mode() == "PRE"
     st.markdown('<div id="header_encuentro"></div>', unsafe_allow_html=True)
     st.header("Encuentro")
 
@@ -2336,7 +3623,7 @@ def pagina_A1():
     st.markdown("**Diversidad demográfica**")
     slider_answer(
         "a11_1",
-        "¿Qué porcentaje las personas que habitualmente utilizan el lugar son mujeres, niñas, niños y personas mayores?",
+        "¿Qué porcentaje de las personas que actualmente utilizan el lugar son mujeres, niñas, niños y personas mayores?" if is_pre else "¿Qué porcentaje las personas que habitualmente utilizan el lugar son mujeres, niñas, niños y personas mayores?",
         0,
         100,
         1,
@@ -2366,7 +3653,7 @@ def pagina_A1():
     st.markdown("**Redes ciudadanas**")
     a12_1 = radio_answer(
         "a12_1",
-        "¿Existen grupos que se organicen para utilizar el lugar? (ej. torneos de fut, "
+        "¿Existen actualmente grupos que se organicen para utilizar el lugar? (ej. torneos de fut, grupos de mamás, scouts, etc.) " if is_pre else "¿Existen grupos que se organicen para utilizar el lugar? (ej. torneos de fut, "
         "grupos de mamás, scouts, etc.)",
         options=[1, 2, 3],
         labels_map={
@@ -2374,6 +3661,7 @@ def pagina_A1():
             2: "Hay por lo menos uno",
             3: "Existen tres o más grupos",
         },
+        allow_unanswered=True,
     )
 
     redes_sin_grupos_container = st.empty()
@@ -2412,9 +3700,10 @@ def pagina_A1():
 
     radio_answer(
         "a12_3",
-        "¿Se crearon o fortalecieron redes ciudadanas que utilicen el lugar a partir de la intervención?",
-        options=[1, 2, 3],
-        labels_map={1: "Sí", 2: "No", 3: "No se sabe"},
+        "¿Qué tan consolidadas son las redes ciudadanas que utilizan el lugar?" if is_pre else "¿Se crearon o fortalecieron redes ciudadanas que utilicen el lugar a partir de la intervención?",
+        options=[1, 2, 3, 4] if is_pre else [1, 2, 3],
+        labels_map={1: "Muy consolidadas", 2: "Bastante fuertes pero podrían mejorar", 3: "Son muy débiles", 4: "No existen redes ciudadanas"} if is_pre else {1: "Sí", 2: "No", 3: "No se sabe"},
+        allow_unanswered=True,
     )
 
     # ---------------------- VOLUNTARIADO / CUIDADO DEL LUGAR ----------------------
@@ -2502,6 +3791,7 @@ def pagina_A1():
             uso_nocturno_horario_container.empty()
 
 def pagina_A2():
+    is_pre = get_survey_mode() == "PRE"
     st.markdown('<div id="header_conexiones"></div>', unsafe_allow_html=True)
     st.header("Conexiones y Accesos")
     mostrar_info_geografica()
@@ -2509,9 +3799,10 @@ def pagina_A2():
     # ---------- Modos de transporte ----------
     a21_use_percent = radio_answer(
         "a21_use_percent",
-        "¿Conoces los porcentajes por modo de transporte que utilizan las personas para llegar al lugar?",
+        "¿Conoces los porcentajes por modo de transporte que utilizan actualmente las personas para llegar al lugar?" if is_pre else "¿Conoces los porcentajes por modo de transporte que utilizan las personas para llegar al lugar?",
         options=[1, 2],
         labels_map={1: "Sí", 2: "No"},
+        allow_unanswered=True,
     )
 
     modos_percent_container = st.empty()
@@ -2534,7 +3825,7 @@ def pagina_A2():
         with modos_majority_container.container():
             radio_answer(
                 "a21_2",
-                "¿De qué forma llega la mayoría de las personas al lugar?",
+                "¿De qué forma llega la mayoría de las personas al lugar actualmente?" if is_pre else "¿De qué forma llega la mayoría de las personas al lugar?",
                 options=[1, 2, 3, 4],
                 labels_map={
                     1: "En auto particular",
@@ -2546,14 +3837,22 @@ def pagina_A2():
 
     # ---------- Conectividad ----------
     st.markdown("**Percepción de conectividad con el lugar**")
-    radio_answer("a22_1", "¿Es fácil llegar al lugar?", [1, 2, 3], {1: "Sí", 2: "Más o menos", 3: "No"})
+    radio_answer("a22_1", "¿Es fácil llegar al lugar actualmente?" if is_pre else "¿Es fácil llegar al lugar?", [1, 2, 3], {1: "Sí", 2: "Más o menos", 3: "No"})
     radio_answer("a22_2", "¿Sueles llegar en automóvil particular?", [1, 2, 3], {1: "Sí", 2: "A veces", 3: "No"})
     a22_2_na = checkbox_answer("a22_2_na", "No aplica")
     if a22_2_na:
         clear_branch("a22_2")
         set_ans("a22_2", None)
 
-    radio_answer("a22_3", "¿Has cambiado a modos más sustentables tras la intervención?", [1, 2], {1: "Sí", 2: "No"})
+    if is_pre:
+        radio_answer(
+            "a22_3",
+            "¿Sueles elegir el modo de transporte más sustentable posible para trasladarte hacia el lugar?",
+            [1, 2, 3],
+            {1: "Sí", 2: "A veces", 3: "No"},
+        )
+    else:
+        radio_answer("a22_3", "¿Has cambiado a modos más sustentables tras la intervención?", [1, 2], {1: "Sí", 2: "No"})
     a22_3_na = checkbox_answer("a22_3_na", "No aplica")
     if a22_3_na:
         clear_branch("a22_3")
@@ -2619,6 +3918,7 @@ def pagina_A2():
         followup_container.empty()
 
 def pagina_A3():
+    is_pre = get_survey_mode() == "PRE"
     st.markdown('<div id="header_comodidad"></div>', unsafe_allow_html=True)
     st.header("Comodidad e Imagen")
 
@@ -2645,17 +3945,31 @@ def pagina_A3():
         cuidado_usuario_container.empty()
 
         with cuidado_resp_container.container():
-            val_resp = radio_answer(
-                "a32_2",
-                "Como parte del equipo responsable, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
-                options=[1, 2, 3],
-                labels_map={
-                    1: "Sí, parece nuevo",
-                    2: "Está en muy buen estado",
-                    3: "La verdad no, está en muy malas condiciones",
-                },
-            )
-        set_ans("a32_1", val_resp)
+            if is_pre:
+                val_resp = radio_answer(
+                    "a32_1",
+                    "Como parte del equipo responsable, ¿cómo describirías el estado actual del lugar?",
+                    options=[1, 2, 3, 4],
+                    labels_map={
+                        1: "Sí, parece nuevo",
+                        2: "Está en muy buen estado",
+                        3: "Está descuidado",
+                        4: "La verdad está en muy malas condiciones",
+                    },
+                )
+                set_ans("a32_2", None)
+            else:
+                val_resp = radio_answer(
+                    "a32_2",
+                    "Como parte del equipo responsable, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
+                    options=[1, 2, 3],
+                    labels_map={
+                        1: "Sí, parece nuevo",
+                        2: "Está en muy buen estado",
+                        3: "La verdad no, está en muy malas condiciones",
+                    },
+                )
+                set_ans("a32_1", val_resp)
 
     else:
         # Rama usuario → solo a32_1 visible, a32_2 debe limpiarse
@@ -2663,17 +3977,31 @@ def pagina_A3():
         cuidado_resp_container.empty()
 
         with cuidado_usuario_container.container():
-            radio_answer(
-                "a32_1",
-                "Como persona usuaria, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
-                options=[1, 2, 3],
-                labels_map={
-                    1: "Sí, parece nuevo",
-                    2: "Está en muy buen estado",
-                    3: "La verdad no, está en muy malas condiciones",
-                },
-            )
-        set_ans("a32_2", None)
+            if is_pre:
+                radio_answer(
+                    "a32_2",
+                    "Como persona usuaria, ¿cómo describirías el estado actual del lugar?",
+                    options=[1, 2, 3, 4],
+                    labels_map={
+                        1: "Sí, parece nuevo",
+                        2: "Está en muy buen estado",
+                        3: "Está descuidado",
+                        4: "La verdad está en muy malas condiciones",
+                    },
+                )
+                set_ans("a32_1", None)
+            else:
+                radio_answer(
+                    "a32_1",
+                    "Como persona usuaria, ¿crees que el lugar se ha mantenido en buen estado después de la inauguración?",
+                    options=[1, 2, 3],
+                    labels_map={
+                        1: "Sí, parece nuevo",
+                        2: "Está en muy buen estado",
+                        3: "La verdad no, está en muy malas condiciones",
+                    },
+                )
+                set_ans("a32_2", None)
 
     # ---------------------- COMODIDAD DEL LUGAR ----------------------
     st.markdown("**Comodidad del lugar**")
@@ -2771,33 +4099,46 @@ def pagina_A3():
 
 
 def pagina_A4():
+    is_pre = get_survey_mode() == "PRE"
     st.markdown('<div id="header_usos"></div>', unsafe_allow_html=True)
     st.header("Usos y actividades")
 
     st.markdown("**Dinamismo del lugar**")
     a41_1 = radio_answer(
         "a41_1",
-        "¿Se cuenta con conteos de personas y actividades previos y posteriores a la intervención?",
+        "¿Se cuenta con conteos de personas y actividades en el estado actual del lugar?" if is_pre else "¿Se cuenta con conteos de personas y actividades previos y posteriores a la intervención?",
         options=[1, 2],
         labels_map={1: "Sí", 2: "No"},
+        allow_unanswered=True,
     )
     dinamismo_conteos_container = st.empty()
     if a41_1 == 1:
         with dinamismo_conteos_container.container():
-            number_answer(
-                "a41_before",
-                "Personas promedio haciendo actividades diferentes ANTES de la intervención",
-                0,
-                1_000_000,
-                1,
-            )
-            number_answer(
-                "a41_after",
-                "Personas promedio haciendo actividades diferentes DESPUÉS de la intervención",
-                0,
-                1_000_000,
-                1,
-            )
+            if is_pre:
+                number_answer(
+                    "a41_before",
+                    "Personas promedio haciendo actividades diferentes en el ESTADO ACTUAL (antes de la intervención)",
+                    0,
+                    1_000_000,
+                    1,
+                )
+                clear_branch("a41_after")
+                set_ans("a41_after", None)
+            else:
+                number_answer(
+                    "a41_before",
+                    "Personas promedio haciendo actividades diferentes ANTES de la intervención",
+                    0,
+                    1_000_000,
+                    1,
+                )
+                number_answer(
+                    "a41_after",
+                    "Personas promedio haciendo actividades diferentes DESPUÉS de la intervención",
+                    0,
+                    1_000_000,
+                    1,
+                )
     else:
         # No conteos → limpiar inputs y usar None (mejor que 0 para no sesgar el cálculo)
         clear_branch("a41_before", "a41_after")
@@ -2806,48 +4147,48 @@ def pagina_A4():
         dinamismo_conteos_container.empty()
     radio_answer(
         "a41_2",
-        "¿Crees que la intervención ha generado un lugar más dinámico y especial para las personas que lo usan?",
+        "¿Crees que actualmente el lugar es dinámico y especial para las personas que lo usan?" if is_pre else "¿Crees que la intervención ha generado un lugar más dinámico y especial para las personas que lo usan?",
         options=[1, 2, 3],
         labels_map={
             1: "¡Sí! Es muy especial para quienes lo usan habitualmente",
-            2: "Ha mejorado mucho, pero tampoco siento demasiado cambio",
-            3: "No he podido notar la diferencia a como era antes",
+            2: "Es un lugar más, pero nada especial" if is_pre else "Ha mejorado mucho, pero tampoco siento demasiado cambio",
+            3: "La verdad no, está bastante abandonado o descuidado" if is_pre else "No he podido notar la diferencia a como era antes",
         },
     )
 
     st.markdown("**Que el lugar sea un referente para la comunidad**")
     radio_answer(
         "a42_1",
-        "¿Crees que la comunidad considera el lugar como una referencia?",
+        "¿Crees que actualmente la comunidad considera el lugar como una referencia?" if is_pre else "¿Crees que la comunidad considera el lugar como una referencia?",
         options=[1, 2, 3],
         labels_map={
-            1: "¡Por supuesto! Se ha vuelto icónico",
-            2: "Sí es más reconocido, pero ya era un referente local",
-            3: "La verdad no",
+            1: "¡Por supuesto! Es icónico" if is_pre else "¡Por supuesto! Se ha vuelto icónico",
+            2: "Sí es reconocido localmente" if is_pre else "Sí es más reconocido, pero ya era un referente local",
+            3: "No realmente, pasa desapercibido" if is_pre else "La verdad no",
         },
     )
 
     st.markdown("**Utilidad del lugar**")
     radio_answer(
         "a43_1",
-        "¿Sientes que ha mejorado la calidad del lugar?",
+        "¿Cómo valorarías la calidad actual del lugar?" if is_pre else "¿Sientes que ha mejorado la calidad del lugar?",
         options=[1, 2, 3, 4],
         labels_map={
-            1: "¡Sí! Bastante. Es mucho mejor que antes",
-            2: "Sí mejoró pero no demasiado",
-            3: "No noto ninguna diferencia",
-            4: "Creo que empeoró la calidad",
+            1: "¡Excelente! Es de muy alta calidad" if is_pre else "¡Sí! Bastante. Es mucho mejor que antes",
+            2: "Es de buena calidad" if is_pre else "Sí mejoró pero no demasiado",
+            3: "Es de calidad regular" if is_pre else "No noto ninguna diferencia",
+            4: "Es de baja calidad" if is_pre else "Creo que empeoró la calidad",
         },
     )
     radio_answer(
         "a43_2",
-        "¿Se ha vuelto más útil para la comunidad?",
+        "¿Qué tan útil es actualmente el lugar para la comunidad?" if is_pre else "¿Se ha vuelto más útil para la comunidad?",
         options=[1, 2, 3, 4],
         labels_map={
-            1: "¡Totalmente! Es mucho más útil ahora",
-            2: "Sí es más útil, pero tampoco demasiado",
-            3: "La verdad tiene la misma utilidad que antes",
-            4: "Creo que antes era más útil para la comunidad",
+            1: "¡Totalmente! Es muy útil" if is_pre else "¡Totalmente! Es mucho más útil ahora",
+            2: "Sí es útil, aunque no demasiado" if is_pre else "Sí es más útil, pero tampoco demasiado",
+            3: "Tiene alguna utilidad limitada" if is_pre else "La verdad tiene la misma utilidad que antes",
+            4: "La verdad no es muy útil" if is_pre else "Creo que antes era más útil para la comunidad",
         },
     )
 
@@ -2858,21 +4199,24 @@ def pagina_A4():
     if A0_3 == 1:
         actividad_economica_notice.empty()
         with actividad_economica_fields.container():
-            radio_answer(
-                "a44_1",
-                "¿Ha aumentado el número de negocios o unidades económicas alrededor del lugar a raíz de la intervención?",
-                options=[1, 2, 3],
-                labels_map={1: "Sí, bastantes", 2: "Sí, por lo menos una", 3: "No, ninguna"},
-            )
+            if is_pre:
+                number_answer("a44_1", "Número de negocios (0-10, tope para score)", 0, 10, 1)
+            else:
+                radio_answer(
+                    "a44_1",
+                    "¿Ha aumentado el número de negocios o unidades económicas alrededor del lugar a raíz de la intervención?",
+                    options=[1, 2, 3],
+                    labels_map={1: "Sí, bastantes", 2: "Sí, por lo menos una", 3: "No, ninguna"},
+                )
             a44_1_na = checkbox_answer("a44_1_na", "No aplica")
             if a44_1_na:
                 clear_branch("a44_1")
                 set_ans("a44_1", None)
             radio_answer(
                 "a44_2",
-                "¿Has percibido un mayor ingreso en tu negocio a partir de la intervención en el lugar?",
+                "¿Has percibido un mayor ingreso en tu negocio a partir de la intervención en el lugar?" if not is_pre else "Si tienes un negocio cerca, ¿cuál es tu nivel de ingresos actual como referencia?",
                 options=[1, 2, 3],
-                labels_map={1: "Sí, muy directamente", 2: "Sí, pero no sé si es por la intervención", 3: "La verdad no"},
+                labels_map={1: "Sí, muy directamente", 2: "Sí, pero no sé si es por la intervención", 3: "La verdad no"} if not is_pre else {1: "Buenos ingresos", 2: "Ingresos moderados", 3: "Ingresos bajos"},
             )
             a44_2_na = checkbox_answer("a44_2_na", "No aplica")
             if a44_2_na:
@@ -2917,32 +4261,34 @@ def pagina_A4():
 def pagina_resultados():
     st.markdown('<div id="header_resultados"></div>', unsafe_allow_html=True)
     st.header("Resultados")
-    ans = st.session_state["answers"]
+    ans_raw = st.session_state["answers"]
+
+    class _AnswersView:
+        def __init__(self, data):
+            self._data = data
+
+        def get(self, key, default=None):
+            return self._data.get(map_answer_key(key), default)
+
+    ans = _AnswersView(ans_raw)
     program_id = ans.get("program_id", "OTRO") or "OTRO"
     A0_3 = ans.get("A0_3", 2) or 2
 
-    st.markdown("### Cargar resultados desde CSV")
+    st.markdown("### Cargar resultados desde texto pegado")
     required_indicator_cols = [
-        "A1.1", "A1.2", "A1.3", "A1.4", "A1.5",
-        "A2.1", "A2.2", "A2.3", "A2.4", "A2.5", "A2.6",
-        "A3.1", "A3.2", "A3.3", "A3.4", "A3.5", "A3.6", "A3.7",
-        "A4.1", "A4.2", "A4.3", "A4.4", "A4.5", "A4.6",
+        map_label_code("A1.1"), map_label_code("A1.2"), map_label_code("A1.3"), map_label_code("A1.4"), map_label_code("A1.5"),
+        map_label_code("A2.1"), map_label_code("A2.2"), map_label_code("A2.3"), map_label_code("A2.4"), map_label_code("A2.5"), map_label_code("A2.6"),
+        map_label_code("A3.1"), map_label_code("A3.2"), map_label_code("A3.3"), map_label_code("A3.4"), map_label_code("A3.5"), map_label_code("A3.6"), map_label_code("A3.7"),
+        map_label_code("A4.1"), map_label_code("A4.2"), map_label_code("A4.3"), map_label_code("A4.4"), map_label_code("A4.5"), map_label_code("A4.6"),
     ]
 
-    uploaded_results_csv = st.file_uploader(
-        "Sube un CSV generado por esta herramienta para reconstruir las gráficas",
-        type=["csv"],
-        key="uploaded_results_csv",
-    )
-
     pasted_results_text = st.text_area(
-        "O pega aquí el CSV (encabezados + filas) o una sola fila en el mismo orden del CSV descargado",
+        "Pega aquí el CSV (encabezados + filas) o una sola fila en el mismo orden del CSV descargado",
         key="pasted_results_text",
         height=120,
     )
 
     uploaded_row = None
-    uploaded_parse_error = None
     paste_parse_error = None
 
     pasted_row = None
@@ -2975,40 +4321,16 @@ def pagina_resultados():
                 chosen_delimiter = max(delimiter_candidates, key=lambda d: pasted_text.count(d))
                 raw_values = next(csv.reader([pasted_text], delimiter=chosen_delimiter))
                 values = [v.strip() for v in raw_values]
-                if len(values) != len(SHEET_COLUMNS):
+                mode_sheet_columns = get_sheet_columns_for_mode()
+                if len(values) != len(mode_sheet_columns):
                     paste_parse_error = (
                         "La fila pegada no coincide con el número esperado de columnas "
-                        f"({len(values)} vs {len(SHEET_COLUMNS)})."
+                        f"({len(values)} vs {len(mode_sheet_columns)})."
                     )
                 else:
-                    pasted_row = pd.Series({col: values[i] for i, col in enumerate(SHEET_COLUMNS)})
+                    pasted_row = pd.Series({col: values[i] for i, col in enumerate(mode_sheet_columns)})
         except Exception as exc:
             paste_parse_error = f"No se pudo interpretar el texto pegado: {exc}"
-
-    if uploaded_results_csv is not None:
-        try:
-            uploaded_df = pd.read_csv(uploaded_results_csv)
-            missing_cols = [c for c in required_indicator_cols if c not in uploaded_df.columns]
-            if uploaded_df.empty:
-                uploaded_parse_error = "El CSV está vacío."
-            elif missing_cols:
-                uploaded_parse_error = (
-                    "El CSV no contiene todas las columnas requeridas. "
-                    f"Faltan: {', '.join(missing_cols)}"
-                )
-            else:
-                if len(uploaded_df) > 1:
-                    selected_row_idx = st.selectbox(
-                        "Selecciona la fila a visualizar",
-                        options=list(range(len(uploaded_df))),
-                        format_func=lambda i: f"Fila {i + 1}",
-                        key="uploaded_results_csv_row_idx",
-                    )
-                else:
-                    selected_row_idx = 0
-                uploaded_row = uploaded_df.iloc[int(selected_row_idx)]
-        except Exception as exc:
-            uploaded_parse_error = f"No se pudo leer el CSV: {exc}"
 
     if pasted_row is not None:
         uploaded_row = pasted_row
@@ -3016,9 +4338,6 @@ def pagina_resultados():
 
     if paste_parse_error:
         st.warning(paste_parse_error)
-
-    if uploaded_parse_error:
-        st.warning(uploaded_parse_error)
 
     def _min_visible_score(value, minimum=20.0, include_none=False):
         """Asegura que los scores tengan un valor mínimo visible."""
@@ -3205,18 +4524,10 @@ def pagina_resultados():
         intangibles_A3_raw.get("Agradable"),
     )
 
-    def zeros_to_none(d):
-        return {k: (None if v == 0 else v) for k, v in d.items()}
-
-    intangibles_A1_with_none = zeros_to_none(intangibles_A1_raw)
-    intangibles_A2_with_none = zeros_to_none(intangibles_A2_raw)
-    intangibles_A3_with_none = zeros_to_none(intangibles_A3_raw)
-    intangibles_A4_with_none = zeros_to_none(intangibles_A4_raw)
-
-    intangibles_A1 = impute_missing_with_penalty(intangibles_A1_with_none, penalty=40.0)
-    intangibles_A2 = impute_missing_with_penalty(intangibles_A2_with_none, penalty=40.0)
-    intangibles_A3 = impute_missing_with_penalty(intangibles_A3_with_none, penalty=40.0)
-    intangibles_A4 = impute_missing_with_penalty(intangibles_A4_with_none, penalty=40.0)
+    intangibles_A1 = impute_missing_with_penalty(intangibles_A1_raw, penalty=40.0)
+    intangibles_A2 = impute_missing_with_penalty(intangibles_A2_raw, penalty=40.0)
+    intangibles_A3 = impute_missing_with_penalty(intangibles_A3_raw, penalty=40.0)
+    intangibles_A4 = impute_missing_with_penalty(intangibles_A4_raw, penalty=40.0)
 
     # ===== Totales y global =====
     A1_total = compute_attribute_total(program_id, "A1", A1_indicators)
@@ -3252,36 +4563,36 @@ def pagina_resultados():
             uploaded_program_id = str(uploaded_row.get("programa", program_id) or program_id)
 
             A1_indicators = {
-                "A1.1": _row_float_or_none("A1.1"),
-                "A1.2": _row_float_or_none("A1.2"),
-                "A1.3": _row_float_or_none("A1.3"),
-                "A1.4": _row_float_or_none("A1.4"),
-                "A1.5": _row_float_or_none("A1.5"),
+                "A1.1": _row_float_or_none(map_label_code("A1.1")),
+                "A1.2": _row_float_or_none(map_label_code("A1.2")),
+                "A1.3": _row_float_or_none(map_label_code("A1.3")),
+                "A1.4": _row_float_or_none(map_label_code("A1.4")),
+                "A1.5": _row_float_or_none(map_label_code("A1.5")),
             }
             A2_indicators = {
-                "A2.1": _row_float_or_none("A2.1"),
-                "A2.2": _row_float_or_none("A2.2"),
-                "A2.3": _row_float_or_none("A2.3"),
-                "A2.4": _row_float_or_none("A2.4"),
-                "A2.5": _row_float_or_none("A2.5"),
-                "A2.6": _row_float_or_none("A2.6"),
+                "A2.1": _row_float_or_none(map_label_code("A2.1")),
+                "A2.2": _row_float_or_none(map_label_code("A2.2")),
+                "A2.3": _row_float_or_none(map_label_code("A2.3")),
+                "A2.4": _row_float_or_none(map_label_code("A2.4")),
+                "A2.5": _row_float_or_none(map_label_code("A2.5")),
+                "A2.6": _row_float_or_none(map_label_code("A2.6")),
             }
             A3_indicators = {
-                "A3.1": _row_float_or_none("A3.1"),
-                "A3.2": _row_float_or_none("A3.2"),
-                "A3.3": _row_float_or_none("A3.3"),
-                "A3.4": _row_float_or_none("A3.4"),
-                "A3.5": _row_float_or_none("A3.5"),
-                "A3.6": _row_float_or_none("A3.6"),
-                "A3.7": _row_float_or_none("A3.7"),
+                "A3.1": _row_float_or_none(map_label_code("A3.1")),
+                "A3.2": _row_float_or_none(map_label_code("A3.2")),
+                "A3.3": _row_float_or_none(map_label_code("A3.3")),
+                "A3.4": _row_float_or_none(map_label_code("A3.4")),
+                "A3.5": _row_float_or_none(map_label_code("A3.5")),
+                "A3.6": _row_float_or_none(map_label_code("A3.6")),
+                "A3.7": _row_float_or_none(map_label_code("A3.7")),
             }
             A4_indicators = {
-                "A4.1": _row_float_or_none("A4.1"),
-                "A4.2": _row_float_or_none("A4.2"),
-                "A4.3": _row_float_or_none("A4.3"),
-                "A4.4": _row_float_or_none("A4.4"),
-                "A4.5": _row_float_or_none("A4.5"),
-                "A4.6": _row_float_or_none("A4.6"),
+                "A4.1": _row_float_or_none(map_label_code("A4.1")),
+                "A4.2": _row_float_or_none(map_label_code("A4.2")),
+                "A4.3": _row_float_or_none(map_label_code("A4.3")),
+                "A4.4": _row_float_or_none(map_label_code("A4.4")),
+                "A4.5": _row_float_or_none(map_label_code("A4.5")),
+                "A4.6": _row_float_or_none(map_label_code("A4.6")),
             }
 
             A1_1_u, A1_2_u, A1_3_u, A1_4_u, A1_5_u = (
@@ -3333,15 +4644,15 @@ def pagina_resultados():
                 intangibles_A3_raw.get("Agradable"),
             )
 
-            intangibles_A1 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A1_raw.items()}, penalty=40.0)
-            intangibles_A2 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A2_raw.items()}, penalty=40.0)
-            intangibles_A3 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A3_raw.items()}, penalty=40.0)
-            intangibles_A4 = impute_missing_with_penalty({k: (None if v == 0 else v) for k, v in intangibles_A4_raw.items()}, penalty=40.0)
+            intangibles_A1 = impute_missing_with_penalty(intangibles_A1_raw, penalty=40.0)
+            intangibles_A2 = impute_missing_with_penalty(intangibles_A2_raw, penalty=40.0)
+            intangibles_A3 = impute_missing_with_penalty(intangibles_A3_raw, penalty=40.0)
+            intangibles_A4 = impute_missing_with_penalty(intangibles_A4_raw, penalty=40.0)
 
-            A1_total = _row_float_or_none("A1_total")
-            A2_total = _row_float_or_none("A2_total")
-            A3_total = _row_float_or_none("A3_total")
-            A4_total = _row_float_or_none("A4_total")
+            A1_total = _row_float_or_none(map_label_code("A1_total"))
+            A2_total = _row_float_or_none(map_label_code("A2_total"))
+            A3_total = _row_float_or_none(map_label_code("A3_total"))
+            A4_total = _row_float_or_none(map_label_code("A4_total"))
             if A1_total is None:
                 A1_total = compute_attribute_total(uploaded_program_id, "A1", A1_indicators)
             if A2_total is None:
@@ -3383,6 +4694,30 @@ def pagina_resultados():
     if uploaded_row is None:
         nombre_lugar = ans.get("nombre_lugar", "").strip()
         nombre_eval = ans.get("nombre_evaluador", "").strip()
+
+    # Exponer bundle y metadatos de resultados actuales para pestaña de comparaciones.
+    st.session_state["current_results_bundle"] = {
+        "program_id": program_id,
+        "indicators": {
+            "A1": dict(A1_indicators),
+            "A2": dict(A2_indicators),
+            "A3": dict(A3_indicators),
+            "A4": dict(A4_indicators),
+        },
+        "totals": {
+            "A1_total": float(A1_total),
+            "A2_total": float(A2_total),
+            "A3_total": float(A3_total),
+            "A4_total": float(A4_total),
+        },
+        "global_score": float(global_score),
+    }
+    st.session_state["current_results_meta"] = {
+        "nombre_lugar": nombre_lugar,
+        "nombre_evaluador": nombre_eval,
+        "mode": get_survey_mode(),
+    }
+
     st.markdown(
         f"**Lugar:** {nombre_lugar or 'Sin nombre'} — "
         f"**Evaluado por:** {nombre_eval or 'Sin especificar'}"
@@ -3688,6 +5023,8 @@ def pagina_resultados():
 
     if all_intangibles:
         df_all_intangibles = pd.DataFrame(all_intangibles).sort_values("Valor", ascending=False).reset_index(drop=True)
+        overall_intangible_mean = float(df_all_intangibles["Valor"].mean())
+        high_performance_mode = overall_intangible_mean >= 80.0
 
         top_n = min(5, len(df_all_intangibles))
         bottom_n = min(5, len(df_all_intangibles))
@@ -3735,24 +5072,26 @@ def pagina_resultados():
         panel_order = ["Peores", "Media", "Mejores"]
         panel_display_names = {
             "Peores": "Oportunidades",
-            "Media": "Promedio",
+            "Media": "Constantes",
             "Mejores": "Fortalezas",
         }
         panel_data = {
             category: df_selected[df_selected["Categoría"] == category].sort_values("Valor", ascending=False).reset_index(drop=True)
             for category in panel_order
         }
+        render_panel_order = ["Mejores", "Media"] if high_performance_mode else panel_order
 
-        max_rows = max((len(panel_data[c]) for c in panel_order), default=1)
+        max_rows = max((len(panel_data[c]) for c in render_panel_order), default=1)
         fig_height = max(4.8, 2.8 + max_rows * 0.65)
         fig_int, ax_int = plt.subplots(figsize=(13.0, fig_height), dpi=110)
         ax_int.axis("off")
 
-        col_w = 0.305
         col_gap = 0.0225
-        col_x = [0.0, col_w + col_gap, 2 * (col_w + col_gap)]
+        num_cols = len(render_panel_order)
+        col_w = (1.0 - (col_gap * (num_cols - 1))) / num_cols
+        col_x = [i * (col_w + col_gap) for i in range(num_cols)]
 
-        for x0, category in zip(col_x, panel_order):
+        for x0, category in zip(col_x, render_panel_order):
             ax_int.add_patch(
                 plt.Rectangle(
                     (x0, 0.05),
@@ -3765,7 +5104,7 @@ def pagina_resultados():
             )
             ax_int.text(
                 x0 + (col_w / 2),
-                0.89,
+                0.85,
                 panel_display_names[category],
                 transform=ax_int.transAxes,
                 ha="center",
@@ -3777,15 +5116,14 @@ def pagina_resultados():
             )
 
             df_cat = panel_data[category]
-            y_start = 0.80
+            y_start = 0.72
             row_gap = 0.13
             for row_idx, (_, row) in enumerate(df_cat.iterrows()):
                 y_text = y_start - row_idx * row_gap
-                score_0_10 = float(row["Valor"]) / 10.0
                 ax_int.text(
                     x0 + 0.02,
                     y_text,
-                    f"• {score_0_10:.1f}  {row['Intangible']}",
+                    f"• {row['Intangible']}",
                     transform=ax_int.transAxes,
                     ha="left",
                     va="center",
@@ -3797,12 +5135,12 @@ def pagina_resultados():
 
         ax_int.text(
             0.5,
-            0.98,
-            "Cualidades Intangibles",
+            1.02,
+            "Aprendizajes del programa",
             transform=ax_int.transAxes,
             ha="center",
             va="center",
-            fontsize=20,
+            fontsize=24,
             fontname="Poppins",
             color="#232544",
             fontweight="bold",
@@ -3815,35 +5153,123 @@ def pagina_resultados():
         ]
         fig_int.legend(
             handles=legend_handles,
-            title="Color por atributo",
+            title="Atributos",
             loc="lower center",
-            ncol=2,
+            ncol=4,
             frameon=False,
-            fontsize=8.5,
-            title_fontsize=9,
-            bbox_to_anchor=(0.5, 0.01),
+            fontsize=13,
+            title_fontsize=14,
+            bbox_to_anchor=(0.5, -0.01),
         )
 
         fig_int.patch.set_facecolor("#FFFFFF")
-        fig_int.subplots_adjust(left=0.03, right=0.99, top=0.93, bottom=0.06)
+        fig_int.subplots_adjust(left=0.03, right=0.99, top=0.88, bottom=0.14)
         st.pyplot(fig_int, use_container_width=True)
 
-        peores_nombres = ", ".join(panel_data["Peores"]["Intangible"].tolist())
-        media_nombres = ", ".join(panel_data["Media"]["Intangible"].tolist())
-        mejores_nombres = ", ".join(panel_data["Mejores"]["Intangible"].tolist())
+        peores_nombres = panel_data["Peores"]["Intangible"].tolist()
+        media_nombres = panel_data["Media"]["Intangible"].tolist()
+        mejores_nombres = panel_data["Mejores"]["Intangible"].tolist()
 
-        st.markdown("#### Interpretación y recomendaciones")
-        st.write(
-            "Los resultados muestran tres grupos claros de intangibles. "
-            f"En **Fortalezas** destacan: {mejores_nombres}. "
-            f"En **Promedio** se ubican: {media_nombres}. "
-            f"En **oportunidades** aparecen: {peores_nombres}."
+        mean_mejores = float(panel_data["Mejores"]["Valor"].mean()) if not panel_data["Mejores"].empty else 0.0
+        mean_media = float(panel_data["Media"]["Valor"].mean()) if not panel_data["Media"].empty else 0.0
+        mean_peores = float(panel_data["Peores"]["Valor"].mean()) if not panel_data["Peores"].empty else 0.0
+        brecha_fp = mean_mejores - mean_peores
+
+        if high_performance_mode:
+            lectura_oportunidades = (
+                "En este escenario de puntajes muy altos, las oportunidades no reflejan una debilidad; "
+                "marcan el siguiente salto para que el buen desempeño se vuelva todavía más parejo."
+            )
+        else:
+            lectura_oportunidades = ""
+
+        if brecha_fp >= 35:
+            lectura_brecha = (
+                "La distancia entre grupos abre una oportunidad amplia para nivelar la experiencia del lugar "
+                "y llevar más cualidades al mismo estándar de desempeño."
+            )
+        elif brecha_fp >= 20:
+            lectura_brecha = (
+                "Se observa un margen claro para conectar mejor fortalezas con oportunidades "
+                "y hacer más consistente la experiencia para toda la comunidad."
+            )
+        else:
+            lectura_brecha = (
+                "El desempeño entre grupos luce relativamente equilibrado, lo que facilita consolidar mejoras de forma sostenida."
+            )
+
+        if mean_media >= 65:
+            lectura_constantes = (
+                "Las cualidades constantes están cerca de consolidarse y pueden pasar a fortalezas con continuidad en su cuidado y activación cotidiana."
+            )
+        elif mean_media >= 45:
+            lectura_constantes = (
+                "Las cualidades constantes muestran una base funcional y tienen buen potencial para consolidarse con prácticas comunitarias regulares."
+            )
+        else:
+            lectura_constantes = (
+                "Las cualidades constantes representan una reserva de crecimiento: fortalecer su continuidad puede mejorar de forma visible la experiencia cotidiana."
+            )
+
+        theme_keywords = {
+            "convivencia": ["comunit", "particip", "inclus", "encuentro", "ident", "cuidado", "conmemor"],
+            "bienestar": ["segur", "limpi", "comod", "agrad", "verde", "clima", "resilien", "salud"],
+            "accesibilidad": ["acces", "conect", "camin", "movil", "trans", "lleg", "proxim"],
+            "activacion": ["dinam", "util", "divers", "econom", "uso", "permanen", "estancia", "activo"],
+        }
+        theme_labels = {
+            "convivencia": "convivencia y organización comunitaria",
+            "bienestar": "bienestar y cuidado cotidiano del lugar",
+            "accesibilidad": "accesibilidad y facilidad para llegar y moverse",
+            "activacion": "actividad, uso continuo y dinamismo local",
+        }
+
+        def summarize_themes(intangible_names, fallback_text):
+            hits = defaultdict(int)
+            for intangible_name in intangible_names:
+                name_norm = str(intangible_name).lower()
+                for theme_key, keywords in theme_keywords.items():
+                    if any(keyword in name_norm for keyword in keywords):
+                        hits[theme_key] += 1
+            if not hits:
+                return fallback_text
+            top_themes = sorted(hits.items(), key=lambda x: x[1], reverse=True)[:2]
+            labels = [theme_labels[k] for k, _ in top_themes]
+            if len(labels) == 1:
+                return labels[0]
+            return f"{labels[0]} y {labels[1]}"
+
+        fortalezas_tema = summarize_themes(mejores_nombres, "prácticas que fortalecen la vida comunitaria")
+        constantes_tema = summarize_themes(media_nombres, "capacidades con potencial claro de consolidación")
+        oportunidades_tema = summarize_themes(peores_nombres, "áreas de oportunidad para ampliar beneficios comunitarios")
+
+        attribute_scores = {
+            "Encuentro": float(A1_total),
+            "Conexiones y Accesos": float(A2_total),
+            "Comodidad e Imagen": float(A3_total),
+            "Usos y Actividades": float(A4_total),
+        }
+        atributo_fuerte = max(attribute_scores, key=attribute_scores.get)
+        atributo_oportunidad = min(attribute_scores, key=attribute_scores.get)
+
+        atributo_lectura = {
+            "Encuentro": "la capacidad del lugar para reunir y vincular personas",
+            "Conexiones y Accesos": "la facilidad para llegar, entrar y moverse",
+            "Comodidad e Imagen": "la percepción de cuidado, seguridad y bienestar",
+            "Usos y Actividades": "el dinamismo cotidiano y las razones para permanecer",
+        }
+        lectura_atributos = (
+            f"Hoy se ve más fuerte **{atributo_fuerte}**, y eso habla de avances reales en "
+            f"{atributo_lectura.get(atributo_fuerte, 'aspectos clave del lugar')}. "
+            f"También hay una oportunidad muy valiosa en **{atributo_oportunidad}**, donde pequeños pasos sostenidos pueden hacer una diferencia grande para más personas."
         )
+
+        st.markdown("#### Interpretación")
         st.write(
-            "**Recomendaciones:** (1) proteger y replicar en otros atributos las prácticas que sostienen los intangibles de Mejores; "
-            "(2) para los de Media, definir acciones de corto plazo con metas de mejora por trimestre para moverlos al grupo alto; "
-            "(3) en Peores, priorizar intervenciones focalizadas y seguimiento frecuente, empezando por los factores de uso, acceso, "
-            "cuidado y organización comunitaria que estén limitando su desempeño."
+            "En conjunto, estas cualidades muestran que el lugar ya está aportando cosas buenas a la comunidad, "
+            f"sobre todo en {fortalezas_tema}. "
+            f"A la vez, hay oportunidades en {oportunidades_tema} que pueden ayudar a que más vecinas y vecinos disfruten el espacio en distintos momentos del día. "
+            f"{lectura_brecha} {lectura_constantes} {lectura_atributos} {lectura_oportunidades}"
         )
 
     attribute_colors = {
@@ -4976,40 +6402,69 @@ def pagina_resultados():
     # --- Exportar CSV ---
     st.markdown("---")
     st.subheader("Descargar resultados")
+    k11 = map_label_code("A1.1")
+    k12 = map_label_code("A1.2")
+    k13 = map_label_code("A1.3")
+    k14 = map_label_code("A1.4")
+    k15 = map_label_code("A1.5")
+    k1t = map_label_code("A1_total")
+    k21 = map_label_code("A2.1")
+    k22 = map_label_code("A2.2")
+    k23 = map_label_code("A2.3")
+    k24 = map_label_code("A2.4")
+    k25 = map_label_code("A2.5")
+    k26 = map_label_code("A2.6")
+    k2t = map_label_code("A2_total")
+    k31 = map_label_code("A3.1")
+    k32 = map_label_code("A3.2")
+    k33 = map_label_code("A3.3")
+    k34 = map_label_code("A3.4")
+    k35 = map_label_code("A3.5")
+    k36 = map_label_code("A3.6")
+    k37 = map_label_code("A3.7")
+    k3t = map_label_code("A3_total")
+    k41 = map_label_code("A4.1")
+    k42 = map_label_code("A4.2")
+    k43 = map_label_code("A4.3")
+    k44 = map_label_code("A4.4")
+    k45 = map_label_code("A4.5")
+    k46 = map_label_code("A4.6")
+    k4t = map_label_code("A4_total")
+
     data = {
         "nombre_lugar": nombre_lugar,
         "nombre_evaluador": nombre_eval,
         "programa": program_id,
         "genero_id": ans.get("A0_1"),
         "equipo_responsable_id": A0_3,
-        "A1.1": A1_indicators["A1.1"],
-        "A1.2": A1_indicators["A1.2"],
-        "A1.3": A1_indicators["A1.3"],
-        "A1.4": A1_indicators["A1.4"],
-        "A1.5": A1_indicators["A1.5"],
-        "A1_total": A1_total,
-        "A2.1": A2_indicators["A2.1"],
-        "A2.2": A2_indicators["A2.2"],
-        "A2.3": A2_indicators["A2.3"],
-        "A2.4": A2_indicators["A2.4"],
-        "A2.5": A2_indicators["A2.5"],
-        "A2.6": A2_indicators["A2.6"],
-        "A2_total": A2_total,
-        "A3.1": A3_indicators["A3.1"],
-        "A3.2": A3_indicators["A3.2"],
-        "A3.3": A3_indicators["A3.3"],
-        "A3.4": A3_indicators["A3.4"],
-        "A3.5": A3_indicators["A3.5"],
-        "A3.6": A3_indicators["A3.6"],
-        "A3.7": A3_indicators["A3.7"],
-        "A3_total": A3_total,
-        "A4.1": A4_indicators["A4.1"],
-        "A4.2": A4_indicators["A4.2"],
-        "A4.3": A4_indicators["A4.3"],
-        "A4.4": A4_indicators["A4.4"],
-        "A4.5": A4_indicators["A4.5"],
-        "A4.6": A4_indicators["A4.6"],
-        "A4_total": A4_total,
+        k11: A1_indicators["A1.1"],
+        k12: A1_indicators["A1.2"],
+        k13: A1_indicators["A1.3"],
+        k14: A1_indicators["A1.4"],
+        k15: A1_indicators["A1.5"],
+        k1t: A1_total,
+        k21: A2_indicators["A2.1"],
+        k22: A2_indicators["A2.2"],
+        k23: A2_indicators["A2.3"],
+        k24: A2_indicators["A2.4"],
+        k25: A2_indicators["A2.5"],
+        k26: A2_indicators["A2.6"],
+        k2t: A2_total,
+        k31: A3_indicators["A3.1"],
+        k32: A3_indicators["A3.2"],
+        k33: A3_indicators["A3.3"],
+        k34: A3_indicators["A3.4"],
+        k35: A3_indicators["A3.5"],
+        k36: A3_indicators["A3.6"],
+        k37: A3_indicators["A3.7"],
+        k3t: A3_total,
+        k41: A4_indicators["A4.1"],
+        k42: A4_indicators["A4.2"],
+        k43: A4_indicators["A4.3"],
+        k44: A4_indicators["A4.4"],
+        k45: A4_indicators["A4.5"],
+        k46: A4_indicators["A4.6"],
+        k4t: A4_total,
         "global_score": global_score,
     }
     save_pending = st.session_state.get("save_pending", False)
@@ -5028,10 +6483,11 @@ def pagina_resultados():
     df = pd.DataFrame([data])
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     safe_name = (nombre_lugar or "lugar").replace(" ", "_")
+    mode_tag = "pre" if get_survey_mode() == "PRE" else "post"
     st.download_button(
         "Descargar resultados en CSV",
         data=csv_bytes,
-        file_name=f"evaluacion_{safe_name}.csv",
+        file_name=f"evaluacion_{mode_tag}_{safe_name}.csv",
         mime="text/csv",
         )
 
@@ -5039,16 +6495,27 @@ def pagina_resultados():
 # =========================================================
 # 10. NAVEGACIÓN ENTRE SECCIONES (TABS)
 # =========================================================
+mode_label = "PRE" if get_survey_mode() == "PRE" else "POST"
+st.markdown("### Configuracion de evaluacion")
+st.radio(
+    "Tipo de evaluacion",
+    options=["POST", "PRE"],
+    index=0 if get_survey_mode() == "POST" else 1,
+    horizontal=True,
+    key="survey_mode_global",
+    on_change=on_survey_mode_change,
+)
+
 sections = [
-    ("Antes de empezar", pagina_antes),
-    ("Encuentro", pagina_A1),
-    ("Conexiones y Accesos", pagina_A2),
-    ("Comodidad e Imagen", pagina_A3),
-    ("Usos y Actividades", pagina_A4),
+    (f"Antes de empezar ({mode_label})", pagina_antes),
+    (f"{map_label_code('A1')} Encuentro", pagina_A1),
+    (f"{map_label_code('A2')} Conexiones y Accesos", pagina_A2),
+    (f"{map_label_code('A3')} Comodidad e Imagen", pagina_A3),
+    (f"{map_label_code('A4')} Usos y Actividades", pagina_A4),
 ]
-tab_labels = [name for name, _ in sections] + ["Resultados"]
+tab_labels = [name for name, _ in sections] + ["Resultados", "Comparaciones"]
 st.markdown(
-    "Recorre todas las pestañas de atributos para completar la evaluación y al final revisa tus resultados en la pestaña **Resultados**."
+    "Recorre todas las pestañas de atributos para completar la evaluación; luego revisa **Resultados** y usa **Comparaciones** para análisis entre evaluaciones."
 )
 st.markdown("<div id='tab_selector'></div>", unsafe_allow_html=True)
 st.markdown(
@@ -5106,7 +6573,7 @@ for tab, (_, render_section) in zip(tabs[: len(sections)], sections):
     with tab:
         render_section()
 
-with tabs[-1]:
+with tabs[-2]:
     st.button(
         "Guardar resultados en Google Sheets",
         on_click=trigger_save_to_sheet,
@@ -5120,6 +6587,9 @@ with tabs[-1]:
         key="btn_restart",
         use_container_width=True,
     )
+
+with tabs[-1]:
+    pagina_comparaciones()
 
 render_floating_back_to_top()
 st.markdown(
